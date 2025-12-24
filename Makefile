@@ -7,7 +7,7 @@
 # container images for deployment on heterogeneous Nomad clients.
 # -------------------------------------------------------------------------------
 
-REGISTRY   ?= registry.service.consul:5000
+REGISTRY   ?= registry.munchbox.cc
 IMAGE      := s3-proxy
 VERSION    ?= latest
 
@@ -55,7 +55,7 @@ push: builder ## Build and push multi-arch images to registry
 	  -t $(FULL_TAG) \
 	  --cache-from type=registry,ref=$(CACHE_TAG) \
 	  --cache-to type=registry,ref=$(CACHE_TAG),mode=max \
-	  --output type=image,push=true,registry.insecure=true \
+	  --output type=image,push=true \
 	  .
 
 # -------------------------------------------------------------------------
