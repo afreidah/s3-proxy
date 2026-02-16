@@ -8,7 +8,7 @@
 // works for all providers since they all speak the S3 protocol.
 // -------------------------------------------------------------------------------
 
-package main
+package storage
 
 import (
 	"context"
@@ -19,6 +19,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/munchbox/s3-proxy/internal/config"
+	"github.com/munchbox/s3-proxy/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -48,7 +50,7 @@ type S3Backend struct {
 
 // NewS3Backend creates a new S3-compatible backend client. Uses BaseEndpoint
 // to direct requests to the configured provider instead of AWS.
-func NewS3Backend(cfg BackendConfig) (*S3Backend, error) {
+func NewS3Backend(cfg config.BackendConfig) (*S3Backend, error) {
 	// --- Create S3 client with custom endpoint ---
 	client := s3.New(s3.Options{
 		Region:       cfg.Region,
@@ -75,8 +77,8 @@ func (b *S3Backend) PutObject(ctx context.Context, key string, body io.Reader, s
 	start := time.Now()
 
 	// --- Start tracing span ---
-	ctx, span := StartSpan(ctx, "Backend "+operation,
-		BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
 	)
 	defer span.End()
 
@@ -115,8 +117,8 @@ func (b *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, i
 	start := time.Now()
 
 	// --- Start tracing span ---
-	ctx, span := StartSpan(ctx, "Backend "+operation,
-		BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
 	)
 	defer span.End()
 
@@ -158,8 +160,8 @@ func (b *S3Backend) HeadObject(ctx context.Context, key string) (int64, string, 
 	start := time.Now()
 
 	// --- Start tracing span ---
-	ctx, span := StartSpan(ctx, "Backend "+operation,
-		BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
 	)
 	defer span.End()
 
@@ -201,8 +203,8 @@ func (b *S3Backend) DeleteObject(ctx context.Context, key string) error {
 	start := time.Now()
 
 	// --- Start tracing span ---
-	ctx, span := StartSpan(ctx, "Backend "+operation,
-		BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
 	)
 	defer span.End()
 
@@ -233,6 +235,6 @@ func (b *S3Backend) recordOperation(operation string, start time.Time, err error
 		status = "error"
 	}
 
-	BackendRequestsTotal.WithLabelValues(operation, b.name, status).Inc()
-	BackendDuration.WithLabelValues(operation, b.name).Observe(time.Since(start).Seconds())
+	telemetry.BackendRequestsTotal.WithLabelValues(operation, b.name, status).Inc()
+	telemetry.BackendDuration.WithLabelValues(operation, b.name).Observe(time.Since(start).Seconds())
 }

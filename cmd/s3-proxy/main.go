@@ -21,6 +21,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/munchbox/s3-proxy/internal/auth"
+	"github.com/munchbox/s3-proxy/internal/config"
+	"github.com/munchbox/s3-proxy/internal/server"
+	"github.com/munchbox/s3-proxy/internal/storage"
+	"github.com/munchbox/s3-proxy/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -29,27 +34,33 @@ func main() {
 	flag.Parse()
 
 	// --- Load configuration ---
-	cfg, err := LoadConfig(*configPath)
+	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
 	// --- Initialize tracing ---
 	ctx := context.Background()
-	shutdownTracer, err := InitTracer(ctx, cfg.Telemetry.Tracing)
+	shutdownTracer, err := telemetry.InitTracer(ctx, cfg.Telemetry.Tracing)
 	if err != nil {
 		log.Fatalf("Failed to initialize tracer: %v", err)
 	}
 
 	// --- Set build info metric ---
-	BuildInfo.WithLabelValues(Version, runtime.Version()).Set(1)
+	telemetry.BuildInfo.WithLabelValues(telemetry.Version, runtime.Version()).Set(1)
 
 	// --- Initialize PostgreSQL store ---
-	store, err := NewStore(cfg.Database.ConnectionString())
+	store, err := storage.NewStore(cfg.Database.ConnectionString())
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	log.Printf("Connected to PostgreSQL: %s:%d/%s", cfg.Database.Host, cfg.Database.Port, cfg.Database.Database)
+
+	// --- Run database migrations ---
+	if err := store.RunMigrations(ctx); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+	log.Println("Database migrations applied")
 
 	// --- Sync quota limits from config to database ---
 	if err := store.SyncQuotaLimits(ctx, cfg.Backends); err != nil {
@@ -57,11 +68,11 @@ func main() {
 	}
 
 	// --- Initialize backends ---
-	backends := make(map[string]*S3Backend)
+	backends := make(map[string]*storage.S3Backend)
 	backendOrder := make([]string, 0, len(cfg.Backends))
 
 	for _, bcfg := range cfg.Backends {
-		backend, err := NewS3Backend(bcfg)
+		backend, err := storage.NewS3Backend(bcfg)
 		if err != nil {
 			log.Fatalf("Failed to initialize backend %s: %v", bcfg.Name, err)
 		}
@@ -71,7 +82,7 @@ func main() {
 	}
 
 	// --- Create backend manager ---
-	manager := NewBackendManager(backends, store, backendOrder)
+	manager := storage.NewBackendManager(backends, store, backendOrder)
 
 	// --- Initial quota metrics update ---
 	if err := manager.UpdateQuotaMetrics(ctx); err != nil {
@@ -89,11 +100,20 @@ func main() {
 		}
 	}()
 
+	// --- Start periodic multipart upload cleanup ---
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			manager.CleanupStaleMultipartUploads(context.Background(), 24*time.Hour)
+		}
+	}()
+
 	// --- Create server ---
-	server := &Server{
+	srv := &server.Server{
 		Manager:       manager,
 		VirtualBucket: cfg.Server.VirtualBucket,
-		AuthToken:     cfg.Auth.Token,
+		AuthConfig:    cfg.Auth,
 	}
 
 	// --- Setup HTTP mux ---
@@ -112,7 +132,7 @@ func main() {
 	})
 
 	// S3 proxy handler (all other paths)
-	mux.Handle("/", server)
+	mux.Handle("/", srv)
 
 	httpServer := &http.Server{
 		Addr:         cfg.Server.ListenAddr,
@@ -150,12 +170,16 @@ func main() {
 	}()
 
 	// --- Log startup info ---
-	log.Printf("S3 Proxy v%s starting on %s", Version, cfg.Server.ListenAddr)
+	log.Printf("S3 Proxy v%s starting on %s", telemetry.Version, cfg.Server.ListenAddr)
 	log.Printf("Virtual bucket: %s", cfg.Server.VirtualBucket)
 	log.Printf("Backends configured: %d", len(cfg.Backends))
 
-	if cfg.Auth.Token == "" {
+	if !auth.NeedsAuth(cfg.Auth) {
 		log.Println("WARNING: Authentication is disabled")
+	} else if cfg.Auth.AccessKeyID != "" {
+		log.Println("Authentication: AWS SigV4 enabled")
+	} else {
+		log.Println("Authentication: legacy token enabled")
 	}
 
 	if cfg.Telemetry.Tracing.Enabled {

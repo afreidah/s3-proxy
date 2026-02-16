@@ -70,7 +70,7 @@ lint: ## Run Go linter
 	golangci-lint run ./...
 
 run: ## Run locally (requires config.yaml)
-	go run . -config config.yaml
+	go run ./cmd/s3-proxy -config config.yaml
 
 # -------------------------------------------------------------------------
 # CLEANUP

@@ -8,12 +8,13 @@
 // for distributed tracing across service boundaries.
 // -------------------------------------------------------------------------------
 
-package main
+package telemetry
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/munchbox/s3-proxy/internal/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -42,7 +43,7 @@ const (
 
 // InitTracer initializes the OpenTelemetry tracer with OTLP export. Returns a
 // shutdown function that should be called on service termination to flush spans.
-func InitTracer(ctx context.Context, cfg TracingConfig) (func(context.Context) error, error) {
+func InitTracer(ctx context.Context, cfg config.TracingConfig) (func(context.Context) error, error) {
 	if !cfg.Enabled {
 		// Return no-op shutdown when tracing is disabled
 		return func(context.Context) error { return nil }, nil
@@ -122,14 +123,14 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 
 // S3 proxy specific attribute keys.
 var (
-	AttrVirtualBucket  = attribute.Key("s3proxy.bucket.virtual")
-	AttrBackendBucket  = attribute.Key("s3proxy.bucket.backend")
-	AttrObjectKey      = attribute.Key("s3proxy.key")
-	AttrBackendName    = attribute.Key("s3proxy.backend.name")
+	AttrVirtualBucket   = attribute.Key("s3proxy.bucket.virtual")
+	AttrBackendBucket   = attribute.Key("s3proxy.bucket.backend")
+	AttrObjectKey       = attribute.Key("s3proxy.key")
+	AttrBackendName     = attribute.Key("s3proxy.backend.name")
 	AttrBackendEndpoint = attribute.Key("s3proxy.backend.endpoint")
-	AttrObjectSize     = attribute.Key("s3proxy.object.size")
-	AttrContentType    = attribute.Key("s3proxy.object.content_type")
-	AttrOperation      = attribute.Key("s3proxy.operation")
+	AttrObjectSize      = attribute.Key("s3proxy.object.size")
+	AttrContentType     = attribute.Key("s3proxy.object.content_type")
+	AttrOperation       = attribute.Key("s3proxy.operation")
 )
 
 // RequestAttributes returns common attributes for HTTP request spans.

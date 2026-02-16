@@ -19,10 +19,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
-COPY *.go ./
+COPY cmd/ cmd/
+COPY internal/ internal/
 
 # Build binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o s3-proxy .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o s3-proxy ./cmd/s3-proxy
 
 # -------------------------------------------------------------------------
 # Runtime Image

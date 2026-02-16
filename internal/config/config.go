@@ -8,7 +8,7 @@
 // returning to catch misconfiguration early.
 // -------------------------------------------------------------------------------
 
-package main
+package config
 
 import (
 	"fmt"
@@ -47,9 +47,12 @@ type ServerConfig struct {
 	VirtualBucket string `yaml:"virtual_bucket"`
 }
 
-// AuthConfig holds authentication settings.
+// AuthConfig holds authentication settings. Supports both AWS SigV4 (for S3
+// client compatibility) and a simple token for backward compatibility.
 type AuthConfig struct {
-	Token string `yaml:"token"`
+	Token          string `yaml:"token"`
+	AccessKeyID    string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
 }
 
 // BackendConfig holds configuration for an S3-compatible storage backend.

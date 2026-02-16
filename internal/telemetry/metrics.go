@@ -8,7 +8,7 @@
 // identification in dashboards and alerting rules.
 // -------------------------------------------------------------------------------
 
-package main
+package telemetry
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
@@ -137,6 +137,28 @@ var (
 		prometheus.GaugeOpts{
 			Name: "s3proxy_quota_bytes_available",
 			Help: "Available bytes (limit - used) for each backend",
+		},
+		[]string{"backend"},
+	)
+
+	// --- Object metrics ---
+
+	// ObjectCount tracks the number of objects stored per backend.
+	ObjectCount = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_objects_count",
+			Help: "Number of objects stored on each backend",
+		},
+		[]string{"backend"},
+	)
+
+	// --- Multipart metrics ---
+
+	// ActiveMultipartUploads tracks in-progress multipart uploads per backend.
+	ActiveMultipartUploads = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_active_multipart_uploads",
+			Help: "Number of in-progress multipart uploads per backend",
 		},
 		[]string{"backend"},
 	)
