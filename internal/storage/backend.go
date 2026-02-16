@@ -1,0 +1,240 @@
+// -------------------------------------------------------------------------------
+// Backend - S3-Compatible Storage Client
+//
+// Project: Munchbox / Author: Alex Freidah
+//
+// Storage backend implementation using AWS SDK v2. Connects to any S3-compatible
+// endpoint (OCI, AWS, B2, MinIO) via custom endpoint configuration. The same code
+// works for all providers since they all speak the S3 protocol.
+// -------------------------------------------------------------------------------
+
+package storage
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/munchbox/s3-proxy/internal/config"
+	"github.com/munchbox/s3-proxy/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+)
+
+// -------------------------------------------------------------------------
+// INTERFACE
+// -------------------------------------------------------------------------
+
+// ObjectBackend defines the interface for object storage operations.
+type ObjectBackend interface {
+	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (etag string, err error)
+	GetObject(ctx context.Context, key string) (body io.ReadCloser, size int64, contentType string, etag string, err error)
+	HeadObject(ctx context.Context, key string) (size int64, contentType string, etag string, err error)
+	DeleteObject(ctx context.Context, key string) error
+}
+
+// -------------------------------------------------------------------------
+// S3 BACKEND IMPLEMENTATION
+// -------------------------------------------------------------------------
+
+// S3Backend implements ObjectBackend using AWS SDK v2.
+type S3Backend struct {
+	client   *s3.Client
+	bucket   string
+	name     string
+	endpoint string
+}
+
+// NewS3Backend creates a new S3-compatible backend client. Uses BaseEndpoint
+// to direct requests to the configured provider instead of AWS.
+func NewS3Backend(cfg config.BackendConfig) (*S3Backend, error) {
+	// --- Create S3 client with custom endpoint ---
+	client := s3.New(s3.Options{
+		Region:       cfg.Region,
+		Credentials:  credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		BaseEndpoint: aws.String(cfg.Endpoint),
+		UsePathStyle: cfg.ForcePathStyle,
+	})
+
+	return &S3Backend{
+		client:   client,
+		bucket:   cfg.Bucket,
+		name:     cfg.Name,
+		endpoint: cfg.Endpoint,
+	}, nil
+}
+
+// -------------------------------------------------------------------------
+// CRUD OPERATIONS
+// -------------------------------------------------------------------------
+
+// PutObject uploads an object to the backend.
+func (b *S3Backend) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (string, error) {
+	const operation = "PutObject"
+	start := time.Now()
+
+	// --- Start tracing span ---
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	)
+	defer span.End()
+
+	input := &s3.PutObjectInput{
+		Bucket:        aws.String(b.bucket),
+		Key:           aws.String(key),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+	}
+
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	}
+
+	result, err := b.client.PutObject(ctx, input)
+
+	// --- Record metrics ---
+	b.recordOperation(operation, start, err)
+
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		return "", fmt.Errorf("put object failed: %w", err)
+	}
+
+	etag := ""
+	if result.ETag != nil {
+		etag = *result.ETag
+	}
+	return etag, nil
+}
+
+// GetObject retrieves an object from the backend.
+func (b *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, string, string, error) {
+	const operation = "GetObject"
+	start := time.Now()
+
+	// --- Start tracing span ---
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	)
+	defer span.End()
+
+	result, err := b.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(key),
+	})
+
+	// --- Record metrics ---
+	b.recordOperation(operation, start, err)
+
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		return nil, 0, "", "", fmt.Errorf("get object failed: %w", err)
+	}
+
+	size := int64(0)
+	if result.ContentLength != nil {
+		size = *result.ContentLength
+	}
+
+	contentType := "application/octet-stream"
+	if result.ContentType != nil {
+		contentType = *result.ContentType
+	}
+
+	etag := ""
+	if result.ETag != nil {
+		etag = *result.ETag
+	}
+
+	return result.Body, size, contentType, etag, nil
+}
+
+// HeadObject retrieves object metadata without the body.
+func (b *S3Backend) HeadObject(ctx context.Context, key string) (int64, string, string, error) {
+	const operation = "HeadObject"
+	start := time.Now()
+
+	// --- Start tracing span ---
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	)
+	defer span.End()
+
+	result, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(key),
+	})
+
+	// --- Record metrics ---
+	b.recordOperation(operation, start, err)
+
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		return 0, "", "", fmt.Errorf("head object failed: %w", err)
+	}
+
+	size := int64(0)
+	if result.ContentLength != nil {
+		size = *result.ContentLength
+	}
+
+	contentType := "application/octet-stream"
+	if result.ContentType != nil {
+		contentType = *result.ContentType
+	}
+
+	etag := ""
+	if result.ETag != nil {
+		etag = *result.ETag
+	}
+
+	return size, contentType, etag, nil
+}
+
+// DeleteObject removes an object from the backend.
+func (b *S3Backend) DeleteObject(ctx context.Context, key string) error {
+	const operation = "DeleteObject"
+	start := time.Now()
+
+	// --- Start tracing span ---
+	ctx, span := telemetry.StartSpan(ctx, "Backend "+operation,
+		telemetry.BackendAttributes(operation, b.name, b.endpoint, b.bucket, key)...,
+	)
+	defer span.End()
+
+	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(key),
+	})
+
+	// --- Record metrics ---
+	b.recordOperation(operation, start, err)
+
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		return fmt.Errorf("delete object failed: %w", err)
+	}
+	return nil
+}
+
+// -------------------------------------------------------------------------
+// METRICS HELPER
+// -------------------------------------------------------------------------
+
+// recordOperation updates Prometheus metrics for a backend operation.
+func (b *S3Backend) recordOperation(operation string, start time.Time, err error) {
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	telemetry.BackendRequestsTotal.WithLabelValues(operation, b.name, status).Inc()
+	telemetry.BackendDuration.WithLabelValues(operation, b.name).Observe(time.Since(start).Seconds())
+}
