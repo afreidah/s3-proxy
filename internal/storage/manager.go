@@ -12,8 +12,10 @@
 package storage
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"sync"
 	"time"
 
 	"github.com/munchbox/s3-proxy/internal/telemetry"
@@ -34,24 +36,56 @@ var (
 
 // BackendManager manages multiple storage backends with quota tracking.
 type BackendManager struct {
-	backends map[string]ObjectBackend // name -> backend
-	store    *Store                   // PostgreSQL store for quota/location
-	order    []string                 // backend selection order
+	backends      map[string]ObjectBackend   // name -> backend
+	store         MetadataStore              // metadata persistence (Store or CircuitBreakerStore)
+	order         []string                   // backend selection order
+	locationCache map[string]locationCacheEntry // key -> cached backend (for degraded reads)
+	cacheMu       sync.RWMutex
+	cacheTTL      time.Duration
+}
+
+// locationCacheEntry holds a cached key-to-backend mapping with TTL.
+type locationCacheEntry struct {
+	backendName string
+	expiry      time.Time
 }
 
 // NewBackendManager creates a new backend manager with the given backends and store.
-func NewBackendManager(backends map[string]ObjectBackend, store *Store, order []string) *BackendManager {
+func NewBackendManager(backends map[string]ObjectBackend, store MetadataStore, order []string, cacheTTL time.Duration) *BackendManager {
 	return &BackendManager{
-		backends: backends,
-		store:    store,
-		order:    order,
+		backends:      backends,
+		store:         store,
+		order:         order,
+		locationCache: make(map[string]locationCacheEntry),
+		cacheTTL:      cacheTTL,
 	}
 }
 
-// Store returns the underlying store for direct access when needed (e.g.,
-// listing parts for multipart uploads from the server layer).
-func (m *BackendManager) Store() *Store {
-	return m.store
+// GetParts returns all parts for a multipart upload. Delegates to the metadata
+// store, keeping the store behind the interface.
+func (m *BackendManager) GetParts(ctx context.Context, uploadID string) ([]MultipartPart, error) {
+	return m.store.GetParts(ctx, uploadID)
+}
+
+// cacheGet returns the cached backend for a key, or false if not cached or expired.
+func (m *BackendManager) cacheGet(key string) (string, bool) {
+	m.cacheMu.RLock()
+	defer m.cacheMu.RUnlock()
+	entry, ok := m.locationCache[key]
+	if !ok || time.Now().After(entry.expiry) {
+		return "", false
+	}
+	return entry.backendName, true
+}
+
+// cacheSet stores a key-to-backend mapping with the configured TTL.
+func (m *BackendManager) cacheSet(key, backend string) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.locationCache[key] = locationCacheEntry{
+		backendName: backend,
+		expiry:      time.Now().Add(m.cacheTTL),
+	}
 }
 
 // -------------------------------------------------------------------------

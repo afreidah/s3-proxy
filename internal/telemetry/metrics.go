@@ -255,6 +255,52 @@ var (
 		[]string{"status"},
 	)
 
+	// --- Circuit breaker metrics ---
+
+	// CircuitBreakerState tracks the current circuit breaker state.
+	// 0=closed (healthy), 1=open (DB down), 2=half-open (probing).
+	CircuitBreakerState = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_circuit_breaker_state",
+			Help: "Current circuit breaker state: 0=closed, 1=open, 2=half-open",
+		},
+	)
+
+	// CircuitBreakerTransitionsTotal counts state transitions.
+	CircuitBreakerTransitionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_circuit_breaker_transitions_total",
+			Help: "Total number of circuit breaker state transitions",
+		},
+		[]string{"from", "to"},
+	)
+
+	// DegradedReadsTotal counts reads served via broadcast during degraded mode.
+	DegradedReadsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_degraded_reads_total",
+			Help: "Total number of read operations served via broadcast during degraded mode",
+		},
+		[]string{"operation"},
+	)
+
+	// DegradedCacheHitsTotal counts location cache hits during degraded reads.
+	DegradedCacheHitsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "s3proxy_degraded_cache_hits_total",
+			Help: "Total number of location cache hits during degraded reads",
+		},
+	)
+
+	// DegradedWriteRejectionsTotal counts writes rejected during degraded mode.
+	DegradedWriteRejectionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_degraded_write_rejections_total",
+			Help: "Total number of write operations rejected during degraded mode",
+		},
+		[]string{"operation"},
+	)
+
 	// --- Info metric ---
 
 	// BuildInfo exposes version information.

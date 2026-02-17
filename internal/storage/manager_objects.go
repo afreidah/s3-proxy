@@ -12,6 +12,7 @@ import (
 	"github.com/munchbox/s3-proxy/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // -------------------------------------------------------------------------
@@ -33,6 +34,11 @@ func (m *BackendManager) PutObject(ctx context.Context, key string, body io.Read
 	// --- Find backend with available quota ---
 	backendName, err := m.store.GetBackendWithSpace(ctx, size, m.order)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			span.SetStatus(codes.Error, "database unavailable")
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return "", ErrServiceUnavailable
+		}
 		if errors.Is(err, ErrNoSpaceAvailable) {
 			span.SetStatus(codes.Error, "insufficient storage")
 			span.SetAttributes(attribute.String("error.type", "quota_exceeded"))
@@ -97,6 +103,9 @@ func (m *BackendManager) withReadFailover(ctx context.Context, operation, key st
 			span.SetStatus(codes.Error, "object not found")
 			return err
 		}
+		if errors.Is(err, ErrDBUnavailable) {
+			return m.broadcastRead(ctx, operation, key, start, span, tryBackend)
+		}
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
 		return fmt.Errorf("failed to find object location: %w", err)
@@ -134,6 +143,61 @@ func (m *BackendManager) withReadFailover(ctx context.Context, operation, key st
 	span.SetStatus(codes.Error, lastErr.Error())
 	span.RecordError(lastErr)
 	return lastErr
+}
+
+// broadcastRead tries all backends when the DB is unavailable. Checks the
+// location cache first for a known-good backend, then falls back to trying
+// every backend in order.
+func (m *BackendManager) broadcastRead(ctx context.Context, operation, key string, start time.Time, span trace.Span, tryBackend func(ctx context.Context, backend ObjectBackend) (int64, error)) error {
+	span.SetAttributes(attribute.Bool("s3proxy.degraded_mode", true))
+	telemetry.DegradedReadsTotal.WithLabelValues(operation).Inc()
+
+	// --- Check location cache first ---
+	if cachedBackend, ok := m.cacheGet(key); ok {
+		if backend, exists := m.backends[cachedBackend]; exists {
+			size, err := tryBackend(ctx, backend)
+			if err == nil {
+				m.recordOperation(operation, cachedBackend, start, nil)
+				span.SetAttributes(attribute.Bool("s3proxy.cache_hit", true))
+				span.SetAttributes(telemetry.AttrObjectSize.Int64(size))
+				span.SetStatus(codes.Ok, "")
+				telemetry.DegradedCacheHitsTotal.Inc()
+				return nil
+			}
+			// Cache hit but backend failed — fall through to broadcast
+		}
+	}
+
+	// --- Broadcast to all backends ---
+	var lastErr error
+	for _, name := range m.order {
+		backend, ok := m.backends[name]
+		if !ok {
+			continue
+		}
+		size, err := tryBackend(ctx, backend)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Success — cache the result for future degraded reads
+		m.cacheSet(key, name)
+		m.recordOperation(operation, name, start, nil)
+		span.SetAttributes(telemetry.AttrBackendName.String(name))
+		span.SetAttributes(telemetry.AttrObjectSize.Int64(size))
+		span.SetStatus(codes.Ok, "")
+		return nil
+	}
+
+	// All backends failed
+	if lastErr != nil {
+		span.SetStatus(codes.Error, lastErr.Error())
+		return ErrObjectNotFound
+	}
+
+	span.SetStatus(codes.Error, "object not found on any backend")
+	return ErrObjectNotFound
 }
 
 // GetObject retrieves an object from the backend where it's stored. Tries the
@@ -200,6 +264,11 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 	// --- Find all source locations (for failover) ---
 	locations, err := m.store.GetAllObjectLocations(ctx, sourceKey)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			span.SetStatus(codes.Error, "database unavailable")
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return "", ErrServiceUnavailable
+		}
 		if errors.Is(err, ErrObjectNotFound) {
 			span.SetStatus(codes.Error, "source object not found")
 			return "", err
@@ -238,6 +307,11 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 	// --- Find destination backend with available quota ---
 	destBackendName, err := m.store.GetBackendWithSpace(ctx, size, m.order)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			span.SetStatus(codes.Error, "database unavailable")
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return "", ErrServiceUnavailable
+		}
 		if errors.Is(err, ErrNoSpaceAvailable) {
 			span.SetStatus(codes.Error, "insufficient storage")
 			return "", ErrInsufficientStorage
@@ -315,6 +389,11 @@ func (m *BackendManager) DeleteObject(ctx context.Context, key string) error {
 	// --- Delete all copies from store ---
 	copies, err := m.store.DeleteObject(ctx, key)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			span.SetStatus(codes.Error, "database unavailable")
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return ErrServiceUnavailable
+		}
 		if errors.Is(err, ErrObjectNotFound) {
 			// Object not in our tracking - treat as success (idempotent delete)
 			span.SetStatus(codes.Ok, "object not found - treating as success")
@@ -380,6 +459,10 @@ func (m *BackendManager) ListObjects(ctx context.Context, prefix, delimiter, sta
 
 	storeResult, err := m.store.ListObjects(ctx, prefix, startAfter, maxKeys)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			span.SetStatus(codes.Error, "database unavailable")
+			return nil, &S3Error{StatusCode: 503, Code: "ServiceUnavailable", Message: "listing unavailable during database outage"}
+		}
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to list objects: %w", err)

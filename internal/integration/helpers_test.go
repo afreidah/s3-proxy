@@ -120,7 +120,7 @@ func TestMain(m *testing.M) {
 		backendOrder = append(backendOrder, bcfg.Name)
 	}
 
-	manager := storage.NewBackendManager(backends, store, backendOrder)
+	manager := storage.NewBackendManager(backends, store, backendOrder, 60*time.Second)
 	testManager = manager
 
 	srv := &server.Server{

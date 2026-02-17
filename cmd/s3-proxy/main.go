@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -111,8 +112,11 @@ func runServe() {
 		)
 	}
 
+	// --- Wrap store with circuit breaker for runtime ---
+	cbStore := storage.NewCircuitBreakerStore(store, cfg.CircuitBreaker)
+
 	// --- Create backend manager ---
-	manager := storage.NewBackendManager(backends, store, backendOrder)
+	manager := storage.NewBackendManager(backends, cbStore, backendOrder, cfg.CircuitBreaker.CacheTTL)
 
 	// --- Initial quota metrics update ---
 	if err := manager.UpdateQuotaMetrics(ctx); err != nil {
@@ -132,7 +136,7 @@ func runServe() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := manager.UpdateQuotaMetrics(bgCtx); err != nil {
+				if err := manager.UpdateQuotaMetrics(bgCtx); err != nil && !errors.Is(err, storage.ErrDBUnavailable) {
 					slog.Error("Failed to update quota metrics", "error", err)
 				}
 			case <-bgCtx.Done():
@@ -173,7 +177,7 @@ func runServe() {
 				select {
 				case <-ticker.C:
 					moved, err := manager.Rebalance(bgCtx, cfg.Rebalance)
-					if err != nil {
+					if err != nil && !errors.Is(err, storage.ErrDBUnavailable) {
 						slog.Error("Rebalance failed", "error", err)
 					} else if moved > 0 {
 						slog.Info("Rebalance completed", "objects_moved", moved)
@@ -198,7 +202,7 @@ func runServe() {
 			defer bgWg.Done()
 			// Run once at startup to catch up on pending replicas
 			created, err := manager.Replicate(bgCtx, cfg.Replication)
-			if err != nil {
+			if err != nil && !errors.Is(err, storage.ErrDBUnavailable) {
 				slog.Error("Replication startup run failed", "error", err)
 			} else if created > 0 {
 				slog.Info("Replication startup run completed", "copies_created", created)
@@ -211,7 +215,7 @@ func runServe() {
 				select {
 				case <-ticker.C:
 					created, err := manager.Replicate(bgCtx, cfg.Replication)
-					if err != nil {
+					if err != nil && !errors.Is(err, storage.ErrDBUnavailable) {
 						slog.Error("Replication failed", "error", err)
 					} else if created > 0 {
 						slog.Info("Replication completed", "copies_created", created)
@@ -241,10 +245,15 @@ func runServe() {
 		slog.Info("Metrics endpoint enabled", "path", cfg.Telemetry.Metrics.Path)
 	}
 
-	// Health check endpoint
+	// Health check endpoint — always 200 so service stays in Consul rotation.
+	// Body reflects DB state for monitoring.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		if cbStore.IsHealthy() {
+			_, _ = w.Write([]byte("ok"))
+		} else {
+			_, _ = w.Write([]byte("degraded"))
+		}
 	})
 
 	// S3 proxy handler (all other paths), optionally rate-limited

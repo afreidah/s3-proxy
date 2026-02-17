@@ -31,6 +31,11 @@ func (m *BackendManager) CreateMultipartUpload(ctx context.Context, key, content
 	// Pick a backend (estimate 0 bytes since final size is unknown)
 	backendName, err := m.store.GetBackendWithSpace(ctx, 0, m.order)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			span.SetStatus(codes.Error, "database unavailable")
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return "", "", ErrServiceUnavailable
+		}
 		if errors.Is(err, ErrNoSpaceAvailable) {
 			span.SetStatus(codes.Error, "insufficient storage")
 			return "", "", ErrInsufficientStorage
@@ -65,6 +70,10 @@ func (m *BackendManager) UploadPart(ctx context.Context, uploadID string, partNu
 
 	mu, err := m.store.GetMultipartUpload(ctx, uploadID)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return "", ErrServiceUnavailable
+		}
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
@@ -107,6 +116,10 @@ func (m *BackendManager) CompleteMultipartUpload(ctx context.Context, uploadID s
 
 	mu, err := m.store.GetMultipartUpload(ctx, uploadID)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return "", ErrServiceUnavailable
+		}
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
@@ -203,6 +216,10 @@ func (m *BackendManager) AbortMultipartUpload(ctx context.Context, uploadID stri
 
 	mu, err := m.store.GetMultipartUpload(ctx, uploadID)
 	if err != nil {
+		if errors.Is(err, ErrDBUnavailable) {
+			telemetry.DegradedWriteRejectionsTotal.WithLabelValues(operation).Inc()
+			return ErrServiceUnavailable
+		}
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
