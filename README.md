@@ -9,7 +9,7 @@ S3 clients (aws cli, rclone, etc.)
         |
         v
   +-----------+
-  | S3 Proxy  |  <-- SigV4 auth, virtual bucket routing
+  | S3 Proxy  |  <-- SigV4 auth, rate limiting, virtual bucket routing
   +-----------+
         |
    +----+----+
@@ -24,18 +24,19 @@ PostgreSQL   OCI Object Storage (or any S3-compatible backend)
 
 ## S3 API Coverage
 
-| Operation | Method | Path | Supported |
-|-----------|--------|------|-----------|
-| PutObject | `PUT` | `/{bucket}/{key}` | Yes |
-| GetObject | `GET` | `/{bucket}/{key}` | Yes |
-| HeadObject | `HEAD` | `/{bucket}/{key}` | Yes |
-| DeleteObject | `DELETE` | `/{bucket}/{key}` | Yes |
-| ListObjectsV2 | `GET` | `/{bucket}?list-type=2` | Yes |
-| CreateMultipartUpload | `POST` | `/{bucket}/{key}?uploads` | Yes |
-| UploadPart | `PUT` | `/{bucket}/{key}?partNumber=N&uploadId=X` | Yes |
-| CompleteMultipartUpload | `POST` | `/{bucket}/{key}?uploadId=X` | Yes |
-| AbortMultipartUpload | `DELETE` | `/{bucket}/{key}?uploadId=X` | Yes |
-| ListParts | `GET` | `/{bucket}/{key}?uploadId=X` | Yes |
+| Operation | Method | Path | Notes |
+|-----------|--------|------|-------|
+| PutObject | `PUT` | `/{bucket}/{key}` | |
+| GetObject | `GET` | `/{bucket}/{key}` | Supports `Range` header (206 Partial Content) |
+| HeadObject | `HEAD` | `/{bucket}/{key}` | |
+| DeleteObject | `DELETE` | `/{bucket}/{key}` | Idempotent (404 from store treated as success) |
+| CopyObject | `PUT` | `/{bucket}/{key}` | Uses `X-Amz-Copy-Source` header |
+| ListObjectsV2 | `GET` | `/{bucket}?list-type=2` | Supports `delimiter` for virtual directories |
+| CreateMultipartUpload | `POST` | `/{bucket}/{key}?uploads` | |
+| UploadPart | `PUT` | `/{bucket}/{key}?partNumber=N&uploadId=X` | |
+| CompleteMultipartUpload | `POST` | `/{bucket}/{key}?uploadId=X` | |
+| AbortMultipartUpload | `DELETE` | `/{bucket}/{key}?uploadId=X` | |
+| ListParts | `GET` | `/{bucket}/{key}?uploadId=X` | |
 
 All requests must target the configured virtual bucket name (default: `unified`). Requests to other bucket names return `404 NoSuchBucket`.
 
@@ -48,6 +49,43 @@ Two methods, checked in order:
 
 If neither `access_key_id` nor `token` is configured, authentication is disabled.
 
+## Degraded Mode (Circuit Breaker)
+
+A three-state circuit breaker wraps all database access:
+
+```
+closed (healthy) → open (DB down) → half-open (probing) → closed
+```
+
+When the database becomes unreachable (consecutive failures exceed `failure_threshold`), the proxy enters **degraded mode**:
+
+- **Reads** broadcast to all backends in order. A location cache (TTL configurable via `cache_ttl`) stores successful lookups to avoid repeated broadcasts for the same key.
+- **Writes** (PUT, DELETE, COPY, multipart) return `503 ServiceUnavailable`.
+- **Health endpoint** returns `degraded` instead of `ok`.
+
+After `open_timeout` elapses, the circuit enters half-open state and sends a single probe request. If the database responds, the circuit closes and normal operation resumes automatically.
+
+## Rebalancing
+
+The rebalancer periodically moves objects between backends to optimize storage distribution. Disabled by default to avoid unexpected egress charges.
+
+Two strategies:
+
+- **pack** - Fills backends in configuration order, consolidating free space on the last backend. Good for maximizing usable capacity on free-tier providers.
+- **spread** - Equalizes utilization ratios across all backends. Good for distributing load evenly.
+
+The `threshold` parameter (0–1) sets the minimum utilization spread required to trigger a rebalance run. Objects are moved in configurable batch sizes.
+
+## Replication
+
+When `replication.factor` is greater than 1, a background worker creates additional copies of objects on different backends to reach the target factor. Read operations automatically fail over to replicas if the primary copy is unavailable.
+
+The worker runs once at startup to catch up on pending replicas, then continues at the configured interval.
+
+## Rate Limiting
+
+Optional per-IP token bucket rate limiting. When enabled, requests exceeding the configured rate return `429 SlowDown`. Stale IP entries are cleaned up automatically.
+
 ## Configuration
 
 YAML config file specified via `-config` flag (default: `config.yaml`). Supports `${ENV_VAR}` expansion.
@@ -56,6 +94,7 @@ YAML config file specified via `-config` flag (default: `config.yaml`). Supports
 server:
   listen_addr: "0.0.0.0:9000"
   virtual_bucket: "unified"
+  max_object_size: 5368709120  # 5 GB (default)
 
 auth:
   access_key_id: "YOUR_ACCESS_KEY"
@@ -68,7 +107,10 @@ database:
   database: "s3proxy"
   user: "s3proxy"
   password: "secret"
-  ssl_mode: "require"    # require for production
+  ssl_mode: "require"
+  max_conns: 10
+  min_conns: 5
+  max_conn_lifetime: "5m"
 
 backends:
   - name: "oci"
@@ -77,7 +119,7 @@ backends:
     bucket: "my-bucket"
     access_key_id: "backend-access-key"
     secret_access_key: "backend-secret-key"
-    force_path_style: true    # required for OCI, MinIO, B2
+    force_path_style: true
     quota_bytes: 21474836480  # 20 GB
 
 telemetry:
@@ -89,6 +131,28 @@ telemetry:
     endpoint: "tempo.service.consul:4317"
     insecure: true
     sample_rate: 1.0
+
+circuit_breaker:
+  failure_threshold: 3     # consecutive DB failures before opening (default: 3)
+  open_timeout: "15s"      # delay before probing recovery (default: 15s)
+  cache_ttl: "60s"         # key→backend cache TTL during degraded reads (default: 60s)
+
+rebalance:
+  enabled: false
+  strategy: "pack"         # "pack" or "spread" (default: pack)
+  interval: "6h"           # run interval (default: 6h)
+  batch_size: 100          # max objects per run (default: 100)
+  threshold: 0.1           # min utilization spread to trigger (default: 0.1)
+
+replication:
+  factor: 1                # copies per object; 1 = no replication (default: 1)
+  worker_interval: "5m"    # replication worker cycle (default: 5m)
+  batch_size: 50           # objects per cycle (default: 50)
+
+rate_limit:
+  enabled: false
+  requests_per_sec: 100    # token refill rate (default: 100)
+  burst: 200               # max burst size (default: 200)
 ```
 
 ## Database
@@ -133,6 +197,21 @@ All metrics are prefixed with `s3proxy_`. Exposed at `/metrics` when enabled.
 | `s3proxy_quota_bytes_available` | Gauge | backend | Remaining space |
 | `s3proxy_objects_count` | Gauge | backend | Stored object count |
 | `s3proxy_active_multipart_uploads` | Gauge | backend | In-progress uploads |
+| `s3proxy_rebalance_objects_moved_total` | Counter | strategy, status | Objects moved by rebalancer |
+| `s3proxy_rebalance_bytes_moved_total` | Counter | strategy | Bytes moved by rebalancer |
+| `s3proxy_rebalance_runs_total` | Counter | strategy, status | Rebalancer executions |
+| `s3proxy_rebalance_duration_seconds` | Histogram | strategy | Rebalancer execution time |
+| `s3proxy_rebalance_skipped_total` | Counter | reason | Rebalancer runs skipped |
+| `s3proxy_replication_pending` | Gauge | — | Objects below replication factor |
+| `s3proxy_replication_copies_created_total` | Counter | — | Replica copies created |
+| `s3proxy_replication_errors_total` | Counter | — | Replication errors |
+| `s3proxy_replication_duration_seconds` | Histogram | — | Replication cycle time |
+| `s3proxy_replication_runs_total` | Counter | status | Replication worker executions |
+| `s3proxy_circuit_breaker_state` | Gauge | — | 0=closed, 1=open, 2=half-open |
+| `s3proxy_circuit_breaker_transitions_total` | Counter | from, to | State transitions |
+| `s3proxy_degraded_reads_total` | Counter | operation | Broadcast reads in degraded mode |
+| `s3proxy_degraded_cache_hits_total` | Counter | — | Cache hits during degraded reads |
+| `s3proxy_degraded_write_rejections_total` | Counter | operation | Writes rejected in degraded mode |
 
 Quota metrics are refreshed from PostgreSQL every 30 seconds (no backend API calls).
 
@@ -144,14 +223,18 @@ Spans are emitted for every HTTP request, manager operation, and backend S3 call
 
 | Path | Purpose |
 |------|---------|
-| `/health` | Health check (returns `ok`) |
+| `/health` | Health check — returns `ok` or `degraded` (always 200) |
 | `/metrics` | Prometheus metrics |
 | `/{bucket}/{key}` | S3 API |
 
 ## Background Tasks
 
-- **Quota metrics updater** - every 30 seconds, queries PostgreSQL for quota stats, object counts, and multipart upload counts. Updates Prometheus gauges.
-- **Stale multipart cleanup** - every hour, aborts multipart uploads older than 24 hours and deletes their temporary part objects from the backend.
+| Task | Interval | Description |
+|------|----------|-------------|
+| Quota metrics updater | 30s | Queries PostgreSQL for quota stats, object counts, multipart counts. Updates Prometheus gauges. |
+| Stale multipart cleanup | 1h | Aborts multipart uploads older than 24h and deletes their temporary part objects. |
+| Rebalancer | configurable (default 6h) | Moves objects between backends per strategy. Only runs when enabled. |
+| Replicator | configurable (default 5m) | Creates copies of under-replicated objects. Only runs when factor > 1. Runs once at startup. |
 
 ## Sync Subcommand
 
@@ -185,6 +268,9 @@ make generate
 
 # Run locally (requires PostgreSQL and config.yaml)
 make run
+
+# Lint
+make lint
 
 # Run unit tests
 make test
@@ -225,37 +311,38 @@ source munchbox-env.sh && cd nomad && make run JOB=s3-proxy
 ```
 src/s3-proxy/
   cmd/s3-proxy/
-    main.go                  Entry point, subcommand dispatch, serve logic
+    main.go                  Entry point, subcommand dispatch, background tasks
     sync.go                  Sync subcommand (bucket import)
   internal/
-    auth/auth.go              SigV4 verification, legacy token auth
-    config/config.go          YAML config loader with env var expansion
+    auth/auth.go             SigV4 verification, legacy token auth
+    config/config.go         YAML config loader with env var expansion
     server/
-      server.go               HTTP router, auth middleware, metrics recording
-      objects.go               PUT, GET, HEAD, DELETE handlers
-      list.go                  ListObjectsV2 handler (XML response)
-      multipart.go             Multipart upload handlers
-      helpers.go               Path parsing, S3 XML error responses
+      server.go              HTTP router, auth middleware, metrics recording
+      objects.go             PUT, GET, HEAD, DELETE, COPY handlers
+      list.go                ListObjectsV2 handler (XML response)
+      multipart.go           Multipart upload handlers
+      helpers.go             Path parsing, S3 XML error responses
+      ratelimit.go           Per-IP token bucket rate limiter
     storage/
-      backend.go               S3 client (AWS SDK v2)
-      manager.go               Multi-backend routing with quota selection
-      store.go                 PostgreSQL storage layer (pgx/v5 + sqlc)
-      migration.sql            Schema DDL (embedded, applied on startup)
-      rebalancer.go            Object rebalancing across backends
-      replicator.go            Cross-backend object replication
+      backend.go             S3 client (AWS SDK v2)
+      metadata.go            MetadataStore interface, sentinel errors
+      store.go               PostgreSQL storage layer (pgx/v5 + sqlc)
+      circuitbreaker.go      Three-state circuit breaker wrapper
+      manager.go             Multi-backend routing, quota selection, cache
+      manager_objects.go     Object CRUD with read failover + broadcast
+      manager_multipart.go   Multipart upload lifecycle
+      manager_metrics.go     Quota metric recording
+      rebalancer.go          Object rebalancing across backends
+      replicator.go          Cross-backend object replication
       sqlc/
-        schema.sql             Schema for sqlc code generation
-        queries/               Annotated SQL query files
-          quota.sql            Quota CRUD operations
-          objects.sql          Object location operations
-          replication.sql      Under-replication detection, conditional inserts
-          multipart.sql        Multipart upload lifecycle
-        *.go                   Generated type-safe query code (do not edit)
+        schema.sql           Schema for sqlc code generation
+        queries/             Annotated SQL query files
+        *.go                 Generated type-safe query code (do not edit)
     telemetry/
-      metrics.go               Prometheus metric definitions
-      tracing.go               OpenTelemetry tracer setup
-  sqlc.yaml                    sqlc configuration
-  Dockerfile                   Multi-stage build
-  Makefile                     Build, test, generate, push targets
-  config.example.yaml          Configuration reference
+      metrics.go             Prometheus metric definitions
+      tracing.go             OpenTelemetry tracer setup
+  sqlc.yaml                  sqlc configuration
+  Dockerfile                 Multi-stage build
+  Makefile                   Build, test, lint, generate, push targets
+  config.example.yaml        Configuration reference
 ```

@@ -15,29 +15,75 @@ server:
   # All requests must target this bucket name
   virtual_bucket: "unified"
 
+  # Maximum upload size in bytes (default: 5 GB)
+  # max_object_size: 5368709120
+
 auth:
-  # Static auth token - clients must send this in X-Proxy-Token header
-  # Leave empty to disable authentication (not recommended)
-  token: "${S3_PROXY_TOKEN}"
+  # AWS SigV4 credentials (recommended)
+  access_key_id: "${S3_PROXY_ACCESS_KEY_ID}"
+  secret_access_key: "${S3_PROXY_SECRET_ACCESS_KEY}"
 
-backend:
-  # S3-compatible endpoint URL
-  # OCI example: https://<namespace>.compat.objectstorage.<region>.oraclecloud.com
-  # AWS example: https://s3.us-east-1.amazonaws.com
-  # B2 example: https://s3.us-west-002.backblazeb2.com
-  endpoint: "${S3_ENDPOINT}"
+  # Legacy token auth (backward compatibility)
+  # Clients send this in X-Proxy-Token header
+  # token: "${S3_PROXY_TOKEN}"
 
-  # Region (required by SDK, some providers ignore it)
-  region: "${S3_REGION}"
+database:
+  host: "${DB_HOST}"
+  port: 5432
+  database: "s3proxy"
+  user: "${DB_USER}"
+  password: "${DB_PASSWORD}"
+  ssl_mode: "require"    # require for production
+  # max_conns: 10        # Max pool connections (default: 10)
+  # min_conns: 5         # Min idle connections (default: 5)
+  # max_conn_lifetime: "5m"
 
-  # Target bucket name on the backend
-  bucket: "${S3_BUCKET}"
+backends:
+  - name: "oci"
+    # S3-compatible endpoint URL
+    # OCI: https://<namespace>.compat.objectstorage.<region>.oraclecloud.com
+    # AWS: https://s3.us-east-1.amazonaws.com
+    # B2:  https://s3.us-west-002.backblazeb2.com
+    endpoint: "${S3_ENDPOINT}"
+    region: "${S3_REGION}"
+    bucket: "${S3_BUCKET}"
+    access_key_id: "${S3_ACCESS_KEY_ID}"
+    secret_access_key: "${S3_SECRET_ACCESS_KEY}"
+    force_path_style: true    # required for OCI, MinIO, B2
+    quota_bytes: 21474836480  # 20 GB
 
-  # S3 credentials
-  access_key_id: "${S3_ACCESS_KEY_ID}"
-  secret_access_key: "${S3_SECRET_ACCESS_KEY}"
+telemetry:
+  metrics:
+    enabled: true
+    path: "/metrics"
+  tracing:
+    enabled: false
+    endpoint: "tempo.service.consul:4317"
+    insecure: true
+    sample_rate: 1.0
 
-  # Use path-style URLs (required for most S3-compatible services)
-  # Set to true for OCI, MinIO, B2, etc.
-  # Set to false for AWS S3 (uses virtual-hosted style)
-  force_path_style: true
+# Circuit breaker for database outages. Always active with sensible defaults.
+# circuit_breaker:
+#   failure_threshold: 3   # consecutive failures before opening (default: 3)
+#   open_timeout: "15s"    # delay before probing recovery (default: 15s)
+#   cache_ttl: "60s"       # key→backend cache TTL during degraded reads (default: 60s)
+
+# Periodic object rebalancing across backends. Disabled by default.
+# rebalance:
+#   enabled: false
+#   strategy: "pack"       # "pack" (consolidate) or "spread" (equalize)
+#   interval: "6h"
+#   batch_size: 100
+#   threshold: 0.1         # min utilization spread to trigger (0-1)
+
+# Cross-backend object replication. factor=1 means no replication.
+# replication:
+#   factor: 1              # copies per object (max: number of backends)
+#   worker_interval: "5m"
+#   batch_size: 50
+
+# Per-IP rate limiting. Disabled by default.
+# rate_limit:
+#   enabled: false
+#   requests_per_sec: 100
+#   burst: 200
