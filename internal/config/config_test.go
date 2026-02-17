@@ -244,6 +244,24 @@ func TestReplicationConfig_DisabledSkipsValidation(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerDefaults(t *testing.T) {
+	cfg := validBaseConfig()
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Fatalf("valid config should pass: %v", err)
+	}
+
+	if cfg.CircuitBreaker.FailureThreshold != 3 {
+		t.Errorf("failure_threshold default = %d, want 3", cfg.CircuitBreaker.FailureThreshold)
+	}
+	if cfg.CircuitBreaker.OpenTimeout != 15*time.Second {
+		t.Errorf("open_timeout default = %v, want 15s", cfg.CircuitBreaker.OpenTimeout)
+	}
+	if cfg.CircuitBreaker.CacheTTL != 60*time.Second {
+		t.Errorf("cache_ttl default = %v, want 60s", cfg.CircuitBreaker.CacheTTL)
+	}
+}
+
 // validBaseConfig returns a Config with all required fields populated (1 backend).
 func validBaseConfig() Config {
 	return Config{
