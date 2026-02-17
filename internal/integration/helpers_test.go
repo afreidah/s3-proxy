@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,9 +30,12 @@ import (
 const virtualBucket = "test-bucket"
 
 var (
-	proxyAddr   string
-	testDB      *sql.DB
-	testManager *storage.BackendManager
+	proxyAddr        string
+	testDB           *sql.DB
+	testManager      *storage.BackendManager
+	testStore        *storage.Store
+	testFailableStore *FailableStore
+	testCBStore      *storage.CircuitBreakerStore
 )
 
 func TestMain(m *testing.M) {
@@ -60,6 +65,11 @@ func TestMain(m *testing.M) {
 			User:     "s3proxy",
 			Password: "s3proxy",
 			SSLMode:  "disable",
+		},
+		CircuitBreaker: config.CircuitBreakerConfig{
+			FailureThreshold: 3,
+			OpenTimeout:      500 * time.Millisecond,
+			CacheTTL:         60 * time.Second,
 		},
 		Backends: []config.BackendConfig{
 			{
@@ -120,7 +130,16 @@ func TestMain(m *testing.M) {
 		backendOrder = append(backendOrder, bcfg.Name)
 	}
 
-	manager := storage.NewBackendManager(backends, store, backendOrder, 60*time.Second)
+	testStore = store
+
+	// Wire: store → FailableStore → CircuitBreakerStore → manager
+	failableStore := &FailableStore{MetadataStore: store}
+	testFailableStore = failableStore
+
+	cbStore := storage.NewCircuitBreakerStore(failableStore, cfg.CircuitBreaker)
+	testCBStore = cbStore
+
+	manager := storage.NewBackendManager(backends, cbStore, backendOrder, 60*time.Second)
 	testManager = manager
 
 	srv := &server.Server{
@@ -253,4 +272,197 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// -------------------------------------------------------------------------
+// FailableStore — injectable failure wrapper for circuit breaker tests
+// -------------------------------------------------------------------------
+
+// errSimulatedDBFailure simulates a database connection error.
+var errSimulatedDBFailure = errors.New("simulated database connection failure")
+
+// FailableStore wraps a MetadataStore and can be toggled to return connection
+// errors, simulating a database outage for circuit breaker integration tests.
+type FailableStore struct {
+	storage.MetadataStore
+	mu      sync.Mutex
+	failing bool
+}
+
+func (f *FailableStore) SetFailing(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failing = v
+}
+
+func (f *FailableStore) isFailing() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.failing
+}
+
+func (f *FailableStore) GetAllObjectLocations(ctx context.Context, key string) ([]storage.ObjectLocation, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetAllObjectLocations(ctx, key)
+}
+
+func (f *FailableStore) RecordObject(ctx context.Context, key, backend string, size int64) error {
+	if f.isFailing() {
+		return errSimulatedDBFailure
+	}
+	return f.MetadataStore.RecordObject(ctx, key, backend, size)
+}
+
+func (f *FailableStore) DeleteObject(ctx context.Context, key string) ([]storage.DeletedCopy, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.DeleteObject(ctx, key)
+}
+
+func (f *FailableStore) ListObjects(ctx context.Context, prefix, startAfter string, maxKeys int) (*storage.ListObjectsResult, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.ListObjects(ctx, prefix, startAfter, maxKeys)
+}
+
+func (f *FailableStore) GetBackendWithSpace(ctx context.Context, size int64, backendOrder []string) (string, error) {
+	if f.isFailing() {
+		return "", errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetBackendWithSpace(ctx, size, backendOrder)
+}
+
+func (f *FailableStore) CreateMultipartUpload(ctx context.Context, uploadID, key, backend, contentType string) error {
+	if f.isFailing() {
+		return errSimulatedDBFailure
+	}
+	return f.MetadataStore.CreateMultipartUpload(ctx, uploadID, key, backend, contentType)
+}
+
+func (f *FailableStore) GetMultipartUpload(ctx context.Context, uploadID string) (*storage.MultipartUpload, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetMultipartUpload(ctx, uploadID)
+}
+
+func (f *FailableStore) RecordPart(ctx context.Context, uploadID string, partNumber int, etag string, size int64) error {
+	if f.isFailing() {
+		return errSimulatedDBFailure
+	}
+	return f.MetadataStore.RecordPart(ctx, uploadID, partNumber, etag, size)
+}
+
+func (f *FailableStore) GetParts(ctx context.Context, uploadID string) ([]storage.MultipartPart, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetParts(ctx, uploadID)
+}
+
+func (f *FailableStore) DeleteMultipartUpload(ctx context.Context, uploadID string) error {
+	if f.isFailing() {
+		return errSimulatedDBFailure
+	}
+	return f.MetadataStore.DeleteMultipartUpload(ctx, uploadID)
+}
+
+func (f *FailableStore) GetQuotaStats(ctx context.Context) (map[string]storage.QuotaStat, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetQuotaStats(ctx)
+}
+
+func (f *FailableStore) GetObjectCounts(ctx context.Context) (map[string]int64, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetObjectCounts(ctx)
+}
+
+func (f *FailableStore) GetActiveMultipartCounts(ctx context.Context) (map[string]int64, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetActiveMultipartCounts(ctx)
+}
+
+func (f *FailableStore) GetStaleMultipartUploads(ctx context.Context, olderThan time.Duration) ([]storage.MultipartUpload, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetStaleMultipartUploads(ctx, olderThan)
+}
+
+func (f *FailableStore) ListObjectsByBackend(ctx context.Context, backendName string, limit int) ([]storage.ObjectLocation, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.ListObjectsByBackend(ctx, backendName, limit)
+}
+
+func (f *FailableStore) MoveObjectLocation(ctx context.Context, key, fromBackend, toBackend string) (int64, error) {
+	if f.isFailing() {
+		return 0, errSimulatedDBFailure
+	}
+	return f.MetadataStore.MoveObjectLocation(ctx, key, fromBackend, toBackend)
+}
+
+func (f *FailableStore) GetUnderReplicatedObjects(ctx context.Context, factor, limit int) ([]storage.ObjectLocation, error) {
+	if f.isFailing() {
+		return nil, errSimulatedDBFailure
+	}
+	return f.MetadataStore.GetUnderReplicatedObjects(ctx, factor, limit)
+}
+
+func (f *FailableStore) RecordReplica(ctx context.Context, key, targetBackend, sourceBackend string, size int64) (bool, error) {
+	if f.isFailing() {
+		return false, errSimulatedDBFailure
+	}
+	return f.MetadataStore.RecordReplica(ctx, key, targetBackend, sourceBackend, size)
+}
+
+// tripCircuitBreaker makes enough failing requests to trip the circuit breaker open.
+func tripCircuitBreaker(t *testing.T) {
+	t.Helper()
+	client := newS3Client(t)
+	ctx := context.Background()
+	// The default failure threshold is 3 — make enough failing requests
+	for i := 0; i < 5; i++ {
+		client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(fmt.Sprintf("trip-circuit-%d", i)),
+		})
+	}
+}
+
+// waitForRecovery waits for the circuit to probe and close after the open timeout.
+// Polls until the circuit is healthy or the timeout expires.
+func waitForRecovery(t *testing.T) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("circuit breaker did not recover within 5s")
+			return
+		default:
+			// Wait at least the open timeout (500ms) before probing
+			time.Sleep(600 * time.Millisecond)
+			// Make a request to trigger the half-open probe
+			client := newS3Client(t)
+			client.HeadObject(context.Background(), &s3.HeadObjectInput{
+				Bucket: aws.String(virtualBucket),
+				Key:    aws.String("probe-recovery"),
+			})
+			if testCBStore.IsHealthy() {
+				return
+			}
+		}
+	}
 }

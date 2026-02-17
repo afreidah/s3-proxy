@@ -1685,7 +1685,7 @@ func TestImportPreExistingObjects(t *testing.T) {
 		}
 
 		// Import each object
-		store := testManager.Store()
+		store := testStore
 		for _, key := range keys {
 			imported, err := store.ImportObject(ctx, key, "minio-1", 100)
 			if err != nil {
@@ -1746,7 +1746,7 @@ func TestImportPreExistingObjects(t *testing.T) {
 			t.Fatalf("direct PutObject: %v", err)
 		}
 
-		store := testManager.Store()
+		store := testStore
 
 		// First import
 		imported, err := store.ImportObject(ctx, key, "minio-1", 200)
@@ -1797,7 +1797,7 @@ func TestImportPreExistingObjects(t *testing.T) {
 		backend := queryObjectBackend(t, key)
 
 		// Try to import the same key — should skip
-		store := testManager.Store()
+		store := testStore
 		imported, err := store.ImportObject(ctx, key, backend, 150)
 		if err != nil {
 			t.Fatalf("ImportObject: %v", err)
@@ -1934,4 +1934,144 @@ func assertHTTPStatus(t *testing.T, err error, wantStatus int) {
 	}
 	// If we can't extract the HTTP status, just note the error type
 	t.Logf("could not extract HTTP status from error (type %T): %v", err, err)
+}
+
+// -------------------------------------------------------------------------
+// CIRCUIT BREAKER DEGRADED MODE
+// -------------------------------------------------------------------------
+
+func TestCircuitBreakerDegradedMode(t *testing.T) {
+	t.Run("ReadsDuringOutage", func(t *testing.T) {
+		resetState(t)
+		client := newS3Client(t)
+		ctx := context.Background()
+
+		// PUT an object while DB is healthy
+		key := uniqueKey(t, "cb-read")
+		body := bytes.Repeat([]byte("R"), 100)
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(virtualBucket),
+			Key:           aws.String(key),
+			Body:          bytes.NewReader(body),
+			ContentLength: aws.Int64(100),
+		})
+		if err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+
+		// Toggle FailableStore to failing
+		testFailableStore.SetFailing(true)
+		defer testFailableStore.SetFailing(false)
+
+		// Trip the circuit breaker
+		tripCircuitBreaker(t)
+
+		// Verify circuit is open
+		if testCBStore.IsHealthy() {
+			t.Fatal("expected circuit to be open")
+		}
+
+		// GET should succeed via broadcast (object exists on backend)
+		resp, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("GetObject during outage should succeed via broadcast: %v", err)
+		}
+		defer resp.Body.Close()
+
+		got, _ := io.ReadAll(resp.Body)
+		if !bytes.Equal(got, body) {
+			t.Errorf("body mismatch: got %d bytes, want %d", len(got), len(body))
+		}
+
+		// HEAD should also succeed via broadcast
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("HeadObject during outage should succeed via broadcast: %v", err)
+		}
+
+		// Restore DB and wait for recovery
+		testFailableStore.SetFailing(false)
+		waitForRecovery(t)
+
+		if !testCBStore.IsHealthy() {
+			t.Error("expected circuit to be closed after recovery")
+		}
+
+		// Normal GET should work again
+		resp2, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("GetObject after recovery: %v", err)
+		}
+		resp2.Body.Close()
+	})
+
+	t.Run("WritesRejectedDuringOutage", func(t *testing.T) {
+		resetState(t)
+		client := newS3Client(t)
+		ctx := context.Background()
+
+		// Toggle FailableStore to failing and trip circuit
+		testFailableStore.SetFailing(true)
+		defer testFailableStore.SetFailing(false)
+
+		tripCircuitBreaker(t)
+
+		if testCBStore.IsHealthy() {
+			t.Fatal("expected circuit to be open")
+		}
+
+		// PUT should return 503
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(virtualBucket),
+			Key:           aws.String(uniqueKey(t, "cb-write")),
+			Body:          bytes.NewReader([]byte("x")),
+			ContentLength: aws.Int64(1),
+		})
+		if err == nil {
+			t.Fatal("PutObject should fail during outage")
+		}
+		assertHTTPStatus(t, err, 503)
+
+		// DELETE should return 503
+		_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String("any-key"),
+		})
+		if err == nil {
+			t.Fatal("DeleteObject should fail during outage")
+		}
+		assertHTTPStatus(t, err, 503)
+
+		// LIST should return 503
+		_, err = client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(virtualBucket),
+		})
+		if err == nil {
+			t.Fatal("ListObjectsV2 should fail during outage")
+		}
+		assertHTTPStatus(t, err, 503)
+
+		// Restore and verify writes work again
+		testFailableStore.SetFailing(false)
+		waitForRecovery(t)
+
+		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(virtualBucket),
+			Key:           aws.String(uniqueKey(t, "cb-write-after")),
+			Body:          bytes.NewReader([]byte("y")),
+			ContentLength: aws.Int64(1),
+		})
+		if err != nil {
+			t.Fatalf("PutObject after recovery should succeed: %v", err)
+		}
+	})
 }
