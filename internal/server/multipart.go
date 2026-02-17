@@ -183,7 +183,7 @@ func (s *Server) handleAbortMultipartUpload(ctx context.Context, w http.Response
 func (s *Server) handleListParts(ctx context.Context, w http.ResponseWriter, r *http.Request, bucket, key string) (int, error) {
 	uploadID := r.URL.Query().Get("uploadId")
 
-	parts, err := s.Manager.Store().GetParts(ctx, uploadID)
+	parts, err := s.Manager.GetParts(ctx, uploadID)
 	if err != nil {
 		return writeStorageError(w, err, "Failed to list parts"), err
 	}

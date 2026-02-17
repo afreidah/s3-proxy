@@ -26,14 +26,15 @@ import (
 
 // Config holds the complete service configuration.
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	Auth        AuthConfig        `yaml:"auth"`
-	Database    DatabaseConfig    `yaml:"database"`
-	Backends    []BackendConfig   `yaml:"backends"`
-	Telemetry   TelemetryConfig   `yaml:"telemetry"`
-	Rebalance   RebalanceConfig   `yaml:"rebalance"`
-	Replication ReplicationConfig `yaml:"replication"`
-	RateLimit   RateLimitConfig   `yaml:"rate_limit"`
+	Server         ServerConfig         `yaml:"server"`
+	Auth           AuthConfig           `yaml:"auth"`
+	Database       DatabaseConfig       `yaml:"database"`
+	Backends       []BackendConfig      `yaml:"backends"`
+	Telemetry      TelemetryConfig      `yaml:"telemetry"`
+	Rebalance      RebalanceConfig      `yaml:"rebalance"`
+	Replication    ReplicationConfig    `yaml:"replication"`
+	RateLimit      RateLimitConfig      `yaml:"rate_limit"`
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
 }
 
 // DatabaseConfig holds PostgreSQL connection settings.
@@ -120,6 +121,15 @@ type RateLimitConfig struct {
 	Enabled       bool    `yaml:"enabled"`
 	RequestsPerSec float64 `yaml:"requests_per_sec"` // Token refill rate (default: 100)
 	Burst         int     `yaml:"burst"`             // Max burst size (default: 200)
+}
+
+// CircuitBreakerConfig holds settings for the database circuit breaker. When
+// the database becomes unreachable, the proxy enters degraded mode: reads
+// broadcast to all backends, writes return 503.
+type CircuitBreakerConfig struct {
+	FailureThreshold int           `yaml:"failure_threshold"` // Consecutive failures before opening (default: 3)
+	OpenTimeout      time.Duration `yaml:"open_timeout"`      // Delay before probing recovery (default: 15s)
+	CacheTTL         time.Duration `yaml:"cache_ttl"`         // TTL for key→backend cache during degraded reads (default: 60s)
 }
 
 // -------------------------------------------------------------------------
@@ -321,6 +331,17 @@ func (c *Config) SetDefaultsAndValidate() error {
 		if c.RateLimit.Burst <= 0 {
 			errors = append(errors, "rate_limit.burst must be positive")
 		}
+	}
+
+	// --- Circuit breaker defaults ---
+	if c.CircuitBreaker.FailureThreshold == 0 {
+		c.CircuitBreaker.FailureThreshold = 3
+	}
+	if c.CircuitBreaker.OpenTimeout == 0 {
+		c.CircuitBreaker.OpenTimeout = 15 * time.Second
+	}
+	if c.CircuitBreaker.CacheTTL == 0 {
+		c.CircuitBreaker.CacheTTL = 60 * time.Second
 	}
 
 	if len(errors) > 0 {
