@@ -99,18 +99,18 @@ func TestGetObject_Success(t *testing.T) {
 	}
 	mgr := newTestManager(store, map[string]*mockBackend{"b1": backend})
 
-	body, size, ct, _, _, err := mgr.GetObject(context.Background(), "key", "")
+	result, err := mgr.GetObject(context.Background(), "key", "")
 	if err != nil {
 		t.Fatalf("GetObject: %v", err)
 	}
-	defer func() { _ = body.Close() }()
-	if size != 5 {
-		t.Errorf("size = %d, want 5", size)
+	defer func() { _ = result.Body.Close() }()
+	if result.Size != 5 {
+		t.Errorf("size = %d, want 5", result.Size)
 	}
-	if ct != "text/plain" {
-		t.Errorf("content-type = %q, want %q", ct, "text/plain")
+	if result.ContentType != "text/plain" {
+		t.Errorf("content-type = %q, want %q", result.ContentType, "text/plain")
 	}
-	got, _ := io.ReadAll(body)
+	got, _ := io.ReadAll(result.Body)
 	if string(got) != "hello" {
 		t.Errorf("body = %q, want %q", got, "hello")
 	}
@@ -120,7 +120,7 @@ func TestGetObject_NotFound(t *testing.T) {
 	store := &mockStore{getAllLocationsErr: ErrObjectNotFound}
 	mgr := newTestManager(store, map[string]*mockBackend{"b1": newMockBackend()})
 
-	_, _, _, _, _, err := mgr.GetObject(context.Background(), "missing", "")
+	_, err := mgr.GetObject(context.Background(), "missing", "")
 	if !errors.Is(err, ErrObjectNotFound) {
 		t.Fatalf("expected ErrObjectNotFound, got %v", err)
 	}
@@ -140,12 +140,12 @@ func TestGetObject_FailoverToReplica(t *testing.T) {
 	}
 	mgr := newTestManager(store, map[string]*mockBackend{"primary": primary, "replica": replica})
 
-	body, _, _, _, _, err := mgr.GetObject(context.Background(), "key", "")
+	result, err := mgr.GetObject(context.Background(), "key", "")
 	if err != nil {
 		t.Fatalf("GetObject should failover: %v", err)
 	}
-	defer func() { _ = body.Close() }()
-	got, _ := io.ReadAll(body)
+	defer func() { _ = result.Body.Close() }()
+	got, _ := io.ReadAll(result.Body)
 	if string(got) != "data" {
 		t.Errorf("body = %q, want %q", got, "data")
 	}
@@ -158,12 +158,12 @@ func TestGetObject_DBUnavailable_BroadcastHit(t *testing.T) {
 	store := &mockStore{getAllLocationsErr: ErrDBUnavailable}
 	mgr := newTestManager(store, map[string]*mockBackend{"b1": backend})
 
-	body, _, _, _, _, err := mgr.GetObject(context.Background(), "key", "")
+	result, err := mgr.GetObject(context.Background(), "key", "")
 	if err != nil {
 		t.Fatalf("GetObject broadcast should succeed: %v", err)
 	}
-	defer func() { _ = body.Close() }()
-	got, _ := io.ReadAll(body)
+	defer func() { _ = result.Body.Close() }()
+	got, _ := io.ReadAll(result.Body)
 	if string(got) != "broadcast" {
 		t.Errorf("body = %q, want %q", got, "broadcast")
 	}
@@ -178,19 +178,19 @@ func TestGetObject_DBUnavailable_CacheHit(t *testing.T) {
 	mgr := newTestManager(store, map[string]*mockBackend{"b1": b1, "b2": b2})
 
 	// First call populates cache via broadcast
-	body1, _, _, _, _, err := mgr.GetObject(context.Background(), "cached-key", "")
+	r1, err := mgr.GetObject(context.Background(), "cached-key", "")
 	if err != nil {
 		t.Fatalf("first GetObject: %v", err)
 	}
-	_ = body1.Close()
+	_ = r1.Body.Close()
 
 	// Second call should use cache
-	body2, _, _, _, _, err := mgr.GetObject(context.Background(), "cached-key", "")
+	r2, err := mgr.GetObject(context.Background(), "cached-key", "")
 	if err != nil {
 		t.Fatalf("second GetObject (cache hit): %v", err)
 	}
-	defer func() { _ = body2.Close() }()
-	got, _ := io.ReadAll(body2)
+	defer func() { _ = r2.Body.Close() }()
+	got, _ := io.ReadAll(r2.Body)
 	if string(got) != "cached" {
 		t.Errorf("body = %q, want %q", got, "cached")
 	}
@@ -203,7 +203,7 @@ func TestGetObject_DBUnavailable_AllFail(t *testing.T) {
 	store := &mockStore{getAllLocationsErr: ErrDBUnavailable}
 	mgr := newTestManager(store, map[string]*mockBackend{"b1": b1, "b2": b2})
 
-	_, _, _, _, _, err := mgr.GetObject(context.Background(), "nowhere", "")
+	_, err := mgr.GetObject(context.Background(), "nowhere", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

@@ -180,15 +180,15 @@ func (m *BackendManager) copyToReplica(ctx context.Context, key string, copies [
 			continue
 		}
 
-		body, size, contentType, _, _, err := srcBackend.GetObject(ctx, key, "")
+		result, err := srcBackend.GetObject(ctx, key, "")
 		if err != nil {
 			slog.Warn("Replication: source read failed, trying next copy",
 				"key", key, "source", copy.BackendName, "error", err)
 			continue
 		}
 
-		_, err = targetBackend.PutObject(ctx, key, body, size, contentType)
-		_ = body.Close()
+		_, err = targetBackend.PutObject(ctx, key, result.Body, result.Size, result.ContentType)
+		_ = result.Body.Close()
 		if err != nil {
 			return "", fmt.Errorf("failed to write to target %s: %w", target, err)
 		}

@@ -212,27 +212,21 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 
 // GetObject retrieves an object from the backend where it's stored. Tries the
 // primary copy first, then falls back to replicas if the primary fails.
-func (m *BackendManager) GetObject(ctx context.Context, key string, rangeHeader string) (io.ReadCloser, int64, string, string, string, error) {
-	var (
-		rBody         io.ReadCloser
-		rSize         int64
-		rContentType  string
-		rETag         string
-		rContentRange string
-	)
+func (m *BackendManager) GetObject(ctx context.Context, key string, rangeHeader string) (*GetObjectResult, error) {
+	var result *GetObjectResult
 
 	err := m.withReadFailover(ctx, "GetObject", key, func(ctx context.Context, backend ObjectBackend) (int64, error) {
-		body, size, contentType, etag, contentRange, err := backend.GetObject(ctx, key, rangeHeader)
+		r, err := backend.GetObject(ctx, key, rangeHeader)
 		if err != nil {
 			return 0, err
 		}
-		rBody, rSize, rContentType, rETag, rContentRange = body, size, contentType, etag, contentRange
-		return size, nil
+		result = r
+		return r.Size, nil
 	})
 	if err != nil {
-		return nil, 0, "", "", "", err
+		return nil, err
 	}
-	return rBody, rSize, rContentType, rETag, rContentRange, nil
+	return result, nil
 }
 
 // HeadObject retrieves object metadata. Tries the primary copy first, then
@@ -350,13 +344,13 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 				continue
 			}
 			bctx, bcancel := m.withTimeout(ctx)
-			body, _, _, _, _, err := srcBackend.GetObject(bctx, sourceKey, "")
+			result, err := srcBackend.GetObject(bctx, sourceKey, "")
 			if err != nil {
 				bcancel()
 				continue
 			}
-			_, copyErr := io.Copy(pw, body)
-			_ = body.Close()
+			_, copyErr := io.Copy(pw, result.Body)
+			_ = result.Body.Close()
 			bcancel()
 			if copyErr != nil {
 				pw.CloseWithError(fmt.Errorf("failed to stream source: %w", copyErr))

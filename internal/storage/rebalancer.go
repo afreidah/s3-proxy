@@ -358,7 +358,7 @@ func (m *BackendManager) executeMoves(ctx context.Context, plan []rebalanceMove,
 		}
 
 		// --- Read from source ---
-		body, size, contentType, _, _, err := srcBackend.GetObject(ctx, move.ObjectKey, "")
+		result, err := srcBackend.GetObject(ctx, move.ObjectKey, "")
 		if err != nil {
 			slog.Warn("Rebalance: failed to read source object",
 				"key", move.ObjectKey, "backend", move.FromBackend, "error", err)
@@ -367,8 +367,8 @@ func (m *BackendManager) executeMoves(ctx context.Context, plan []rebalanceMove,
 		}
 
 		// --- Write to destination ---
-		_, err = destBackend.PutObject(ctx, move.ObjectKey, body, size, contentType)
-		_ = body.Close()
+		_, err = destBackend.PutObject(ctx, move.ObjectKey, result.Body, result.Size, result.ContentType)
+		_ = result.Body.Close()
 		if err != nil {
 			slog.Warn("Rebalance: failed to write destination object",
 				"key", move.ObjectKey, "backend", move.ToBackend, "error", err)

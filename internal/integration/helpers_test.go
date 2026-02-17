@@ -224,6 +224,7 @@ func resetState(t *testing.T) {
 			t.Fatalf("resetState: %v", err)
 		}
 	}
+	testManager.ClearCache()
 }
 
 // uniqueKey generates a collision-free object key.

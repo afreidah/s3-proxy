@@ -53,20 +53,25 @@ func (m *mockBackend) PutObject(_ context.Context, key string, body io.Reader, _
 	return etag, nil
 }
 
-func (m *mockBackend) GetObject(_ context.Context, key string, _ string) (io.ReadCloser, int64, string, string, string, error) {
+func (m *mockBackend) GetObject(_ context.Context, key string, _ string) (*GetObjectResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.getErr != nil {
-		return nil, 0, "", "", "", m.getErr
+		return nil, m.getErr
 	}
 	obj, ok := m.objects[key]
 	if !ok {
-		return nil, 0, "", "", "", fmt.Errorf("object %q not found", key)
+		return nil, fmt.Errorf("object %q not found", key)
 	}
 	// Return a copy of the data so the caller can read it after the lock is released
 	cp := make([]byte, len(obj.data))
 	copy(cp, obj.data)
-	return io.NopCloser(bytes.NewReader(cp)), int64(len(cp)), obj.contentType, obj.etag, "", nil
+	return &GetObjectResult{
+		Body:        io.NopCloser(bytes.NewReader(cp)),
+		Size:        int64(len(cp)),
+		ContentType: obj.contentType,
+		ETag:        obj.etag,
+	}, nil
 }
 
 func (m *mockBackend) HeadObject(_ context.Context, key string) (int64, string, string, error) {

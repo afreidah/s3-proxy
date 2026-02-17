@@ -29,10 +29,19 @@ import (
 // INTERFACE
 // -------------------------------------------------------------------------
 
+// GetObjectResult holds the response from a GetObject call.
+type GetObjectResult struct {
+	Body         io.ReadCloser
+	Size         int64
+	ContentType  string
+	ETag         string
+	ContentRange string
+}
+
 // ObjectBackend defines the interface for object storage operations.
 type ObjectBackend interface {
 	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (etag string, err error)
-	GetObject(ctx context.Context, key string, rangeHeader string) (body io.ReadCloser, size int64, contentType string, etag string, contentRange string, err error)
+	GetObject(ctx context.Context, key string, rangeHeader string) (*GetObjectResult, error)
 	HeadObject(ctx context.Context, key string) (size int64, contentType string, etag string, err error)
 	DeleteObject(ctx context.Context, key string) error
 }
@@ -129,7 +138,7 @@ func (b *S3Backend) PutObject(ctx context.Context, key string, body io.Reader, s
 // GetObject retrieves an object from the backend. When rangeHeader is non-empty
 // (e.g. "bytes=0-99"), it is passed through to S3 and the response includes a
 // contentRange value (e.g. "bytes 0-99/1000") for 206 Partial Content responses.
-func (b *S3Backend) GetObject(ctx context.Context, key string, rangeHeader string) (io.ReadCloser, int64, string, string, string, error) {
+func (b *S3Backend) GetObject(ctx context.Context, key string, rangeHeader string) (*GetObjectResult, error) {
 	const operation = "GetObject"
 	start := time.Now()
 
@@ -155,30 +164,27 @@ func (b *S3Backend) GetObject(ctx context.Context, key string, rangeHeader strin
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-		return nil, 0, "", "", "", fmt.Errorf("get object failed: %w", err)
+		return nil, fmt.Errorf("get object failed: %w", err)
 	}
 
-	size := int64(0)
+	out := &GetObjectResult{Body: result.Body}
+
 	if result.ContentLength != nil {
-		size = *result.ContentLength
+		out.Size = *result.ContentLength
 	}
-
-	contentType := "application/octet-stream"
 	if result.ContentType != nil {
-		contentType = *result.ContentType
+		out.ContentType = *result.ContentType
+	} else {
+		out.ContentType = "application/octet-stream"
 	}
-
-	etag := ""
 	if result.ETag != nil {
-		etag = *result.ETag
+		out.ETag = *result.ETag
 	}
-
-	contentRange := ""
 	if result.ContentRange != nil {
-		contentRange = *result.ContentRange
+		out.ContentRange = *result.ContentRange
 	}
 
-	return result.Body, size, contentType, etag, contentRange, nil
+	return out, nil
 }
 
 // HeadObject retrieves object metadata without the body.

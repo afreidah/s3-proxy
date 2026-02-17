@@ -43,6 +43,7 @@ type BackendManager struct {
 	cacheMu        sync.RWMutex
 	cacheTTL       time.Duration
 	backendTimeout time.Duration // per-operation timeout for backend S3 calls
+	stopCache      chan struct{} // signals cache eviction goroutine to stop
 }
 
 // locationCacheEntry holds a cached key-to-backend mapping with TTL.
@@ -53,14 +54,33 @@ type locationCacheEntry struct {
 
 // NewBackendManager creates a new backend manager with the given backends and store.
 func NewBackendManager(backends map[string]ObjectBackend, store MetadataStore, order []string, cacheTTL, backendTimeout time.Duration) *BackendManager {
-	return &BackendManager{
+	m := &BackendManager{
 		backends:       backends,
 		store:          store,
 		order:          order,
 		locationCache:  make(map[string]locationCacheEntry),
 		cacheTTL:       cacheTTL,
 		backendTimeout: backendTimeout,
+		stopCache:      make(chan struct{}),
 	}
+
+	// Periodically evict expired cache entries.
+	if cacheTTL > 0 {
+		go func() {
+			ticker := time.NewTicker(cacheTTL)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					m.cacheEvict()
+				case <-m.stopCache:
+					return
+				}
+			}
+		}()
+	}
+
+	return m
 }
 
 // GetParts returns all parts for a multipart upload. Delegates to the metadata
@@ -88,6 +108,30 @@ func (m *BackendManager) cacheSet(key, backend string) {
 		backendName: backend,
 		expiry:      time.Now().Add(m.cacheTTL),
 	}
+}
+
+// cacheEvict removes expired entries from the location cache.
+func (m *BackendManager) cacheEvict() {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	now := time.Now()
+	for key, entry := range m.locationCache {
+		if now.After(entry.expiry) {
+			delete(m.locationCache, key)
+		}
+	}
+}
+
+// ClearCache removes all entries from the location cache.
+func (m *BackendManager) ClearCache() {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.locationCache = make(map[string]locationCacheEntry)
+}
+
+// Close stops the background cache eviction goroutine.
+func (m *BackendManager) Close() {
+	close(m.stopCache)
 }
 
 // -------------------------------------------------------------------------

@@ -67,7 +67,7 @@ generate: ## Generate sqlc query code
 	sqlc generate
 
 test: ## Run Go tests
-	go test -v ./...
+	go test -race -v ./...
 
 lint: ## Run Go linter
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed"; exit 1; }
@@ -91,7 +91,7 @@ integration-test: integration-deps ## Run integration tests
 	MINIO2_ENDPOINT=http://localhost:19002 \
 	POSTGRES_HOST=localhost \
 	POSTGRES_PORT=15432 \
-	go test -v -tags integration -count=1 ./internal/integration/; \
+	go test -race -v -tags integration -count=1 ./internal/integration/; \
 	rc=$$?; $(MAKE) integration-clean; exit $$rc
 
 integration-clean: ## Stop and remove integration test containers

@@ -257,9 +257,10 @@ func runServe() {
 	})
 
 	// S3 proxy handler (all other paths), optionally rate-limited
+	var rl *server.RateLimiter
 	var s3Handler http.Handler = srv
 	if cfg.RateLimit.Enabled {
-		rl := server.NewRateLimiter(cfg.RateLimit)
+		rl = server.NewRateLimiter(cfg.RateLimit)
 		s3Handler = rl.Middleware(srv)
 		slog.Info("Rate limiting enabled",
 			"requests_per_sec", cfg.RateLimit.RequestsPerSec,
@@ -295,6 +296,14 @@ func runServe() {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			slog.Error("HTTP server shutdown error", "error", err)
 		}
+
+		// Stop rate limiter cleanup goroutine
+		if rl != nil {
+			rl.Close()
+		}
+
+		// Stop cache eviction goroutine
+		manager.Close()
 
 		// Close database connection
 		store.Close()

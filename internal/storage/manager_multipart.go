@@ -163,14 +163,14 @@ func (m *BackendManager) CompleteMultipartUpload(ctx context.Context, uploadID s
 		for _, part := range parts {
 			partKey := fmt.Sprintf("__multipart/%s/%d", uploadID, part.PartNumber)
 			bctx, bcancel := m.withTimeout(ctx)
-			body, _, _, _, _, err := backend.GetObject(bctx, partKey, "")
+			result, err := backend.GetObject(bctx, partKey, "")
 			if err != nil {
 				bcancel()
 				pw.CloseWithError(fmt.Errorf("failed to read part %d: %w", part.PartNumber, err))
 				return
 			}
-			_, err = io.Copy(pw, body)
-			_ = body.Close()
+			_, err = io.Copy(pw, result.Body)
+			_ = result.Body.Close()
 			bcancel()
 			if err != nil {
 				pw.CloseWithError(fmt.Errorf("failed to stream part %d: %w", part.PartNumber, err))

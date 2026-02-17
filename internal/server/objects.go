@@ -82,36 +82,36 @@ func (s *Server) handlePut(ctx context.Context, w http.ResponseWriter, r *http.R
 func (s *Server) handleGet(ctx context.Context, w http.ResponseWriter, r *http.Request, key string) (int, int64, error) {
 	rangeHeader := r.Header.Get("Range")
 
-	body, size, contentType, etag, contentRange, err := s.Manager.GetObject(ctx, key, rangeHeader)
+	result, err := s.Manager.GetObject(ctx, key, rangeHeader)
 	if err != nil {
 		return writeStorageError(w, err, "Failed to retrieve object"), 0, err
 	}
-	defer func() { _ = body.Close() }()
+	defer func() { _ = result.Body.Close() }()
 
 	// --- Add size to span ---
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(
-		telemetry.AttrObjectSize.Int64(size),
-		telemetry.AttrContentType.String(contentType),
+		telemetry.AttrObjectSize.Int64(result.Size),
+		telemetry.AttrContentType.String(result.ContentType),
 	)
 
-	w.Header().Set("Content-Type", contentType)
-	if size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Content-Type", result.ContentType)
+	if result.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(result.Size, 10))
 	}
-	if etag != "" {
-		w.Header().Set("ETag", etag)
+	if result.ETag != "" {
+		w.Header().Set("ETag", result.ETag)
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	status := http.StatusOK
-	if contentRange != "" {
-		w.Header().Set("Content-Range", contentRange)
+	if result.ContentRange != "" {
+		w.Header().Set("Content-Range", result.ContentRange)
 		status = http.StatusPartialContent
 	}
 	w.WriteHeader(status)
 
-	written, copyErr := io.Copy(w, body)
+	written, copyErr := io.Copy(w, result.Body)
 	if copyErr != nil {
 		return status, written, fmt.Errorf("error streaming body: %w", copyErr)
 	}

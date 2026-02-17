@@ -17,6 +17,7 @@ type RateLimiter struct {
 	limiters map[string]*visitorLimiter
 	rate     rate.Limit
 	burst    int
+	stop     chan struct{}
 }
 
 type visitorLimiter struct {
@@ -30,17 +31,29 @@ func NewRateLimiter(cfg config.RateLimitConfig) *RateLimiter {
 		limiters: make(map[string]*visitorLimiter),
 		rate:     rate.Limit(cfg.RequestsPerSec),
 		burst:    cfg.Burst,
+		stop:     make(chan struct{}),
 	}
 
 	// Background cleanup of stale entries every 3 minutes
 	go func() {
+		ticker := time.NewTicker(3 * time.Minute)
+		defer ticker.Stop()
 		for {
-			time.Sleep(3 * time.Minute)
-			rl.cleanup(10 * time.Minute)
+			select {
+			case <-ticker.C:
+				rl.cleanup(10 * time.Minute)
+			case <-rl.stop:
+				return
+			}
 		}
 	}()
 
 	return rl
+}
+
+// Close stops the background cleanup goroutine.
+func (rl *RateLimiter) Close() {
+	close(rl.stop)
 }
 
 // Allow checks whether a request from the given IP is allowed.
