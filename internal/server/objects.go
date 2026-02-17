@@ -12,7 +12,6 @@ package server
 import (
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/munchbox/s3-proxy/internal/storage"
 	"github.com/munchbox/s3-proxy/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -68,12 +66,7 @@ func (s *Server) handlePut(ctx context.Context, w http.ResponseWriter, r *http.R
 
 	etag, err := s.Manager.PutObject(ctx, key, r.Body, r.ContentLength, contentType)
 	if err != nil {
-		if errors.Is(err, storage.ErrInsufficientStorage) {
-			writeS3Error(w, http.StatusInsufficientStorage, "InsufficientStorage", "No backend has sufficient quota")
-			return http.StatusInsufficientStorage, err
-		}
-		writeS3Error(w, http.StatusBadGateway, "InternalError", "Failed to store object")
-		return http.StatusBadGateway, err
+		return writeStorageError(w, err, "Failed to store object"), err
 	}
 
 	if etag != "" {
@@ -91,12 +84,7 @@ func (s *Server) handleGet(ctx context.Context, w http.ResponseWriter, r *http.R
 
 	body, size, contentType, etag, contentRange, err := s.Manager.GetObject(ctx, key, rangeHeader)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotFound) {
-			writeS3Error(w, http.StatusNotFound, "NoSuchKey", "Object not found")
-			return http.StatusNotFound, 0, err
-		}
-		writeS3Error(w, http.StatusBadGateway, "InternalError", "Failed to retrieve object")
-		return http.StatusBadGateway, 0, err
+		return writeStorageError(w, err, "Failed to retrieve object"), 0, err
 	}
 	defer func() { _ = body.Close() }()
 
@@ -135,12 +123,7 @@ func (s *Server) handleGet(ctx context.Context, w http.ResponseWriter, r *http.R
 func (s *Server) handleHead(ctx context.Context, w http.ResponseWriter, r *http.Request, key string) (int, error) {
 	size, contentType, etag, err := s.Manager.HeadObject(ctx, key)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotFound) {
-			writeS3Error(w, http.StatusNotFound, "NoSuchKey", "Object not found")
-			return http.StatusNotFound, err
-		}
-		writeS3Error(w, http.StatusBadGateway, "InternalError", "Failed to retrieve object metadata")
-		return http.StatusBadGateway, err
+		return writeStorageError(w, err, "Failed to retrieve object metadata"), err
 	}
 
 	// --- Add size to span ---
@@ -164,8 +147,7 @@ func (s *Server) handleHead(ctx context.Context, w http.ResponseWriter, r *http.
 // success (S3 idempotent delete), so any error returned is a real backend failure.
 func (s *Server) handleDelete(ctx context.Context, w http.ResponseWriter, r *http.Request, key string) (int, error) {
 	if err := s.Manager.DeleteObject(ctx, key); err != nil {
-		writeS3Error(w, http.StatusBadGateway, "InternalError", "Failed to delete object")
-		return http.StatusBadGateway, err
+		return writeStorageError(w, err, "Failed to delete object"), err
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -192,16 +174,7 @@ func (s *Server) handleCopyObject(ctx context.Context, w http.ResponseWriter, r 
 
 	etag, err := s.Manager.CopyObject(ctx, sourceKey, destKey)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotFound) {
-			writeS3Error(w, http.StatusNotFound, "NoSuchKey", "Source object not found")
-			return http.StatusNotFound, err
-		}
-		if errors.Is(err, storage.ErrInsufficientStorage) {
-			writeS3Error(w, http.StatusInsufficientStorage, "InsufficientStorage", "No backend has sufficient quota")
-			return http.StatusInsufficientStorage, err
-		}
-		writeS3Error(w, http.StatusBadGateway, "InternalError", "Failed to copy object")
-		return http.StatusBadGateway, err
+		return writeStorageError(w, err, "Failed to copy object"), err
 	}
 
 	result := copyObjectResult{

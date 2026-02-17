@@ -84,8 +84,7 @@ func (s *Server) handleCreateMultipartUpload(ctx context.Context, w http.Respons
 
 	uploadID, _, err := s.Manager.CreateMultipartUpload(ctx, key, contentType)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to create multipart upload")
-		return http.StatusInternalServerError, err
+		return writeStorageError(w, err, "Failed to create multipart upload"), err
 	}
 
 	result := initiateMultipartUploadResult{
@@ -128,8 +127,7 @@ func (s *Server) handleUploadPart(ctx context.Context, w http.ResponseWriter, r 
 
 	etag, err := s.Manager.UploadPart(ctx, uploadID, partNumber, r.Body, r.ContentLength)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to upload part")
-		return http.StatusInternalServerError, err
+		return writeStorageError(w, err, "Failed to upload part"), err
 	}
 
 	w.Header().Set("ETag", etag)
@@ -154,8 +152,7 @@ func (s *Server) handleCompleteMultipartUpload(ctx context.Context, w http.Respo
 
 	etag, err := s.Manager.CompleteMultipartUpload(ctx, uploadID, partNumbers)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to complete multipart upload")
-		return http.StatusInternalServerError, err
+		return writeStorageError(w, err, "Failed to complete multipart upload"), err
 	}
 
 	result := completeMultipartUploadResult{
@@ -188,8 +185,7 @@ func (s *Server) handleListParts(ctx context.Context, w http.ResponseWriter, r *
 
 	parts, err := s.Manager.Store().GetParts(ctx, uploadID)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to list parts")
-		return http.StatusInternalServerError, err
+		return writeStorageError(w, err, "Failed to list parts"), err
 	}
 
 	result := listPartsResult{

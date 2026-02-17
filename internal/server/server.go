@@ -12,7 +12,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -81,10 +80,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 	defer span.End()
 
-	// --- Create context with timeout ---
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
 	// --- Route by method ---
 	var status int
 	var err error
@@ -92,80 +87,60 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// --- Bucket-level operations (no key) ---
 	if key == "" {
-		if method == http.MethodGet {
-			status, err = s.handleListObjectsV2(ctx, w, r, bucket)
-			s.recordRequest(method, status, start, 0, 0)
-			if err != nil {
-				span.SetStatus(codes.Error, err.Error())
-				span.RecordError(err)
-			}
-			span.SetAttributes(attribute.Int("http.status_code", status))
-			elapsed := time.Since(start)
-			logAttrs := []any{"operation", "LIST", "path", r.URL.Path, "remote", r.RemoteAddr, "status", status, "duration", elapsed}
-			if err != nil {
-				slog.Error("Request failed", append(logAttrs, "error", err)...)
-			} else {
-				slog.Info("Request completed", logAttrs...)
-			}
-			return
-		}
-		s.recordRequest(method, http.StatusMethodNotAllowed, start, 0, 0)
-		writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported for bucket")
-		span.SetStatus(codes.Error, "method not allowed for bucket")
-		return
-	}
-
-	// --- Multipart upload routing ---
-	query := r.URL.Query()
-	_, hasUploads := query["uploads"]
-	uploadID := query.Get("uploadId")
-
-	if hasUploads && method == http.MethodPost {
-		// POST /{bucket}/{key}?uploads -> CreateMultipartUpload
-		status, err = s.handleCreateMultipartUpload(ctx, w, r, bucket, key)
-	} else if uploadID != "" {
-		switch method {
-		case http.MethodPut:
-			// PUT /{bucket}/{key}?partNumber=N&uploadId=X -> UploadPart
-			requestSize = r.ContentLength
-			status, err = s.handleUploadPart(ctx, w, r, key)
-		case http.MethodPost:
-			// POST /{bucket}/{key}?uploadId=X -> CompleteMultipartUpload
-			status, err = s.handleCompleteMultipartUpload(ctx, w, r, bucket, key)
-		case http.MethodDelete:
-			// DELETE /{bucket}/{key}?uploadId=X -> AbortMultipartUpload
-			status, err = s.handleAbortMultipartUpload(ctx, w, uploadID)
-		case http.MethodGet:
-			// GET /{bucket}/{key}?uploadId=X -> ListParts
-			status, err = s.handleListParts(ctx, w, r, bucket, key)
-		default:
+		if method != http.MethodGet {
 			s.recordRequest(method, http.StatusMethodNotAllowed, start, 0, 0)
-			writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported")
-			span.SetStatus(codes.Error, "method not allowed")
+			writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported for bucket")
+			span.SetStatus(codes.Error, "method not allowed for bucket")
 			return
 		}
+		status, err = s.handleListObjectsV2(ctx, w, r, bucket)
 	} else {
-		// --- Standard object operations ---
-		switch method {
-		case http.MethodPut:
-			if copySource := r.Header.Get("X-Amz-Copy-Source"); copySource != "" {
-				status, err = s.handleCopyObject(ctx, w, r, bucket, key, copySource)
-			} else {
+		// --- Multipart upload routing ---
+		query := r.URL.Query()
+		_, hasUploads := query["uploads"]
+		uploadID := query.Get("uploadId")
+
+		if hasUploads && method == http.MethodPost {
+			status, err = s.handleCreateMultipartUpload(ctx, w, r, bucket, key)
+		} else if uploadID != "" {
+			switch method {
+			case http.MethodPut:
 				requestSize = r.ContentLength
-				status, err = s.handlePut(ctx, w, r, key)
+				status, err = s.handleUploadPart(ctx, w, r, key)
+			case http.MethodPost:
+				status, err = s.handleCompleteMultipartUpload(ctx, w, r, bucket, key)
+			case http.MethodDelete:
+				status, err = s.handleAbortMultipartUpload(ctx, w, uploadID)
+			case http.MethodGet:
+				status, err = s.handleListParts(ctx, w, r, bucket, key)
+			default:
+				s.recordRequest(method, http.StatusMethodNotAllowed, start, 0, 0)
+				writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported")
+				span.SetStatus(codes.Error, "method not allowed")
+				return
 			}
-		case http.MethodGet:
-			status, responseSize, err = s.handleGet(ctx, w, r, key)
-		case http.MethodHead:
-			status, err = s.handleHead(ctx, w, r, key)
-		case http.MethodDelete:
-			status, err = s.handleDelete(ctx, w, r, key)
-		default:
-			s.recordRequest(method, http.StatusMethodNotAllowed, start, 0, 0)
-			slog.Warn("Method not allowed", "method", method, "path", r.URL.Path, "remote", r.RemoteAddr)
-			writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported")
-			span.SetStatus(codes.Error, "method not allowed")
-			return
+		} else {
+			switch method {
+			case http.MethodPut:
+				if copySource := r.Header.Get("X-Amz-Copy-Source"); copySource != "" {
+					status, err = s.handleCopyObject(ctx, w, r, bucket, key, copySource)
+				} else {
+					requestSize = r.ContentLength
+					status, err = s.handlePut(ctx, w, r, key)
+				}
+			case http.MethodGet:
+				status, responseSize, err = s.handleGet(ctx, w, r, key)
+			case http.MethodHead:
+				status, err = s.handleHead(ctx, w, r, key)
+			case http.MethodDelete:
+				status, err = s.handleDelete(ctx, w, r, key)
+			default:
+				s.recordRequest(method, http.StatusMethodNotAllowed, start, 0, 0)
+				slog.Warn("Method not allowed", "method", method, "path", r.URL.Path, "remote", r.RemoteAddr)
+				writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported")
+				span.SetStatus(codes.Error, "method not allowed")
+				return
+			}
 		}
 	}
 

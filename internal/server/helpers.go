@@ -11,9 +11,12 @@ package server
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/munchbox/s3-proxy/internal/storage"
 )
 
 // parsePath extracts bucket and key from the URL path.
@@ -59,6 +62,19 @@ var xmlReplacer = strings.NewReplacer(
 // xmlEscape escapes special XML characters.
 func xmlEscape(s string) string {
 	return xmlReplacer.Replace(s)
+}
+
+// writeStorageError checks if err is an *storage.S3Error and writes the
+// appropriate S3 XML error response. Falls back to 502 InternalError for
+// untyped errors. Returns the HTTP status code used.
+func writeStorageError(w http.ResponseWriter, err error, fallbackMsg string) int {
+	var s3err *storage.S3Error
+	if errors.As(err, &s3err) {
+		writeS3Error(w, s3err.StatusCode, s3err.Code, s3err.Message)
+		return s3err.StatusCode
+	}
+	writeS3Error(w, http.StatusBadGateway, "InternalError", fallbackMsg)
+	return http.StatusBadGateway
 }
 
 // writeXML writes an S3-compatible XML response with the standard XML header.

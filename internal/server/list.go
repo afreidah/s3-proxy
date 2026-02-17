@@ -41,8 +41,7 @@ func (s *Server) handleListObjectsV2(ctx context.Context, w http.ResponseWriter,
 
 	result, err := s.Manager.ListObjects(ctx, prefix, delimiter, startAfter, maxKeys)
 	if err != nil {
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to list objects")
-		return http.StatusInternalServerError, err
+		return writeStorageError(w, err, "Failed to list objects"), err
 	}
 
 	type xmlContent struct {

@@ -32,15 +32,28 @@ var migrationSQL string
 // ERRORS
 // -------------------------------------------------------------------------
 
+// S3Error is a structured error that carries an HTTP status code and S3 error
+// code, allowing the server layer to translate storage errors into S3 XML
+// responses without per-handler error mapping.
+type S3Error struct {
+	StatusCode int    // HTTP status code (e.g. 404, 507)
+	Code       string // S3 error code (e.g. "NoSuchKey")
+	Message    string // Human-readable message
+}
+
+func (e *S3Error) Error() string {
+	return e.Message
+}
+
 var (
-	// ErrNoSpaceAvailable is returned when no backend has enough quota.
+	// ErrNoSpaceAvailable is an internal error used between store and manager.
 	ErrNoSpaceAvailable = errors.New("no backend has sufficient quota")
 
 	// ErrObjectNotFound is returned when an object is not in the location table.
-	ErrObjectNotFound = errors.New("object not found")
+	ErrObjectNotFound = &S3Error{StatusCode: 404, Code: "NoSuchKey", Message: "object not found"}
 
 	// ErrMultipartUploadNotFound is returned when a multipart upload ID is not found.
-	ErrMultipartUploadNotFound = errors.New("multipart upload not found")
+	ErrMultipartUploadNotFound = &S3Error{StatusCode: 404, Code: "NoSuchUpload", Message: "multipart upload not found"}
 )
 
 // -------------------------------------------------------------------------
