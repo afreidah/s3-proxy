@@ -1,9 +1,21 @@
+// -------------------------------------------------------------------------------
+// Authentication Tests - SigV4 and Token Verification
+//
+// Project: Munchbox / Author: Alex Freidah
+//
+// Unit tests for AWS SigV4 field parsing, canonical query construction, signing
+// key derivation, and the authentication dispatch logic for both SigV4 and legacy
+// token methods.
+// -------------------------------------------------------------------------------
+
 package auth
 
 import (
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/munchbox/s3-proxy/internal/config"
 )
@@ -43,6 +55,11 @@ func TestBuildCanonicalQueryString(t *testing.T) {
 			name:   "multiple params sorted",
 			values: url.Values{"prefix": {"a"}, "delimiter": {"/"}, "max-keys": {"100"}},
 			want:   "delimiter=%2F&max-keys=100&prefix=a",
+		},
+		{
+			name:   "spaces encoded as %20 not +",
+			values: url.Values{"prefix": {"my photos"}},
+			want:   "prefix=my%20photos",
 		},
 	}
 
@@ -142,5 +159,75 @@ func TestAuthenticate_SigV4Unconfigured(t *testing.T) {
 	err := Authenticate(r, cfg)
 	if err == nil {
 		t.Error("SigV4 with no credentials should fail")
+	}
+}
+
+func TestAuthenticate_BypassWithNoHeader(t *testing.T) {
+	// SigV4 configured but request has no Authorization header — must deny
+	cfg := config.AuthConfig{AccessKeyID: "AKID", SecretAccessKey: "secret"}
+	r, _ := http.NewRequest("GET", "/bucket/key", nil)
+
+	err := Authenticate(r, cfg)
+	if err == nil {
+		t.Error("request with no auth header should be denied when SigV4 is configured")
+	}
+}
+
+func TestAuthenticate_TokenConfiguredNoHeader(t *testing.T) {
+	// Token configured but request has no X-Proxy-Token or Authorization header — must deny
+	cfg := config.AuthConfig{Token: "my-secret"}
+	r, _ := http.NewRequest("GET", "/bucket/key", nil)
+
+	err := Authenticate(r, cfg)
+	if err == nil {
+		t.Error("request with no auth header should be denied when token is configured")
+	}
+}
+
+func TestVerifySigV4_StaleTimestamp(t *testing.T) {
+	// A request signed with a timestamp 30 minutes in the past should be rejected
+	staleDate := time.Now().UTC().Add(-30 * time.Minute).Format("20060102T150405Z")
+	dateStamp := staleDate[:8]
+	secret := "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+	accessKey := "AKIDEXAMPLE"
+
+	r, _ := http.NewRequest("GET", "/bucket/key", nil)
+	r.Header.Set("X-Amz-Date", staleDate)
+	r.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+	r.Host = "localhost"
+
+	// Build a valid signature so we test the timestamp check, not a sig mismatch
+	signedHeaders := []string{"host", "x-amz-content-sha256", "x-amz-date"}
+	canonicalRequest := buildCanonicalRequest(r, signedHeaders)
+	credentialScope := dateStamp + "/us-east-1/s3/aws4_request"
+	stringToSign := "AWS4-HMAC-SHA256\n" + staleDate + "\n" + credentialScope + "\n" + hashSHA256([]byte(canonicalRequest))
+	signingKey := deriveSigningKey(secret, dateStamp, "us-east-1", "s3")
+	signature := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+
+	r.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential="+accessKey+"/"+credentialScope+
+			", SignedHeaders=host;x-amz-content-sha256;x-amz-date"+
+			", Signature="+signature)
+
+	err := VerifySigV4(r, accessKey, secret)
+	if err == nil {
+		t.Error("stale timestamp (30m) should be rejected")
+	}
+}
+
+func TestSigV4Encode(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"hello", "hello"},
+		{"hello world", "hello%20world"},
+		{"a+b", "a%2Bb"},
+		{"a/b", "a%2Fb"},
+	}
+	for _, tt := range tests {
+		got := sigV4Encode(tt.in)
+		if got != tt.want {
+			t.Errorf("sigV4Encode(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

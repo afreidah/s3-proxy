@@ -1,3 +1,12 @@
+// -------------------------------------------------------------------------------
+// Helper Tests - Path Parsing and XML Escaping
+//
+// Project: Munchbox / Author: Alex Freidah
+//
+// Unit tests for URL path parsing (bucket/key extraction) and XML special
+// character escaping used in S3-compatible error responses.
+// -------------------------------------------------------------------------------
+
 package server
 
 import (

@@ -15,17 +15,22 @@ CREATE TABLE IF NOT EXISTS backend_quotas (
     updated_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Track which backend stores which object
+-- Track which backend stores which object (composite PK supports replication)
 CREATE TABLE IF NOT EXISTS object_locations (
-    object_key   TEXT PRIMARY KEY,
+    object_key   TEXT NOT NULL,
     backend_name TEXT NOT NULL REFERENCES backend_quotas(backend_name),
     size_bytes   BIGINT NOT NULL,
-    created_at   TIMESTAMPTZ DEFAULT NOW()
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (object_key, backend_name)
 );
 
 -- Index for efficient backend lookups
 CREATE INDEX IF NOT EXISTS idx_object_locations_backend
     ON object_locations(backend_name);
+
+-- Index for efficient LIKE prefix queries on object keys
+CREATE INDEX IF NOT EXISTS idx_object_locations_key_pattern
+    ON object_locations(object_key text_pattern_ops);
 
 -- Index for cleanup queries
 CREATE INDEX IF NOT EXISTS idx_object_locations_created

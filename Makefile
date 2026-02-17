@@ -42,7 +42,7 @@ builder: ## Ensure the Buildx builder exists
 
 build: ## Build for local architecture
 	@echo "Building $(FULL_TAG) for local architecture"
-	docker build -t $(FULL_TAG) .
+	docker build --build-arg VERSION=$(VERSION) -t $(FULL_TAG) .
 
 # -------------------------------------------------------------------------
 # BUILD AND PUSH (MULTI-ARCH)
@@ -52,6 +52,7 @@ push: builder ## Build and push multi-arch images to registry
 	@echo "Building and pushing $(FULL_TAG) for $(PLATFORMS)"
 	docker buildx build \
 	  --platform $(PLATFORMS) \
+	  --build-arg VERSION=$(VERSION) \
 	  -t $(FULL_TAG) \
 	  --cache-from type=registry,ref=$(CACHE_TAG) \
 	  --cache-to type=registry,ref=$(CACHE_TAG),mode=max \
@@ -61,6 +62,9 @@ push: builder ## Build and push multi-arch images to registry
 # -------------------------------------------------------------------------
 # DEVELOPMENT
 # -------------------------------------------------------------------------
+
+generate: ## Generate sqlc query code
+	sqlc generate
 
 test: ## Run Go tests
 	go test -v ./...
@@ -73,6 +77,27 @@ run: ## Run locally (requires config.yaml)
 	go run ./cmd/s3-proxy -config config.yaml
 
 # -------------------------------------------------------------------------
+# INTEGRATION TESTS
+# -------------------------------------------------------------------------
+
+COMPOSE_FILE := docker-compose.test.yml
+
+integration-deps: ## Start integration test dependencies (MinIO + PostgreSQL)
+	docker compose -f $(COMPOSE_FILE) up -d minio-1 minio-2 postgres --wait
+	docker compose -f $(COMPOSE_FILE) run --rm minio-setup
+
+integration-test: integration-deps ## Run integration tests
+	MINIO1_ENDPOINT=http://localhost:19000 \
+	MINIO2_ENDPOINT=http://localhost:19002 \
+	POSTGRES_HOST=localhost \
+	POSTGRES_PORT=15432 \
+	go test -v -tags integration -count=1 ./internal/integration/; \
+	rc=$$?; $(MAKE) integration-clean; exit $$rc
+
+integration-clean: ## Stop and remove integration test containers
+	docker compose -f $(COMPOSE_FILE) down -v
+
+# -------------------------------------------------------------------------
 # CLEANUP
 # -------------------------------------------------------------------------
 
@@ -80,5 +105,5 @@ clean: ## Remove build artifacts and local image
 	go clean
 	docker rmi $(FULL_TAG) || true
 
-.PHONY: help builder build push test lint run clean
+.PHONY: help builder build push generate test lint run integration-deps integration-test integration-clean clean
 .DEFAULT_GOAL := help

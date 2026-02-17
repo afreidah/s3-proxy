@@ -32,10 +32,11 @@ import (
 const (
 	// TracerName identifies spans created by this service.
 	TracerName = "s3proxy"
-
-	// Version of the service for trace metadata.
-	Version = "0.1.0"
 )
+
+// Version of the service for trace metadata. Set at build time via
+// -ldflags "-X github.com/munchbox/s3-proxy/internal/telemetry.Version=..."
+var Version = "dev"
 
 // -------------------------------------------------------------------------
 // TRACER SETUP
@@ -64,8 +65,7 @@ func InitTracer(ctx context.Context, cfg config.TracingConfig) (func(context.Con
 	// --- Create resource with service info ---
 	res, err := resource.Merge(
 		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
+		resource.NewSchemaless(
 			semconv.ServiceName(TracerName),
 			semconv.ServiceVersion(Version),
 		),

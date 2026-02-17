@@ -1,0 +1,12 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/storage/sqlc/queries"
+    schema: "internal/storage/sqlc/schema.sql"
+    gen:
+      go:
+        package: "db"
+        out: "internal/storage/sqlc"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true

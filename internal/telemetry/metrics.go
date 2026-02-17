@@ -163,6 +163,98 @@ var (
 		[]string{"backend"},
 	)
 
+	// --- Rebalancer metrics ---
+
+	// RebalanceObjectsMoved counts objects moved by the rebalancer.
+	RebalanceObjectsMoved = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_rebalance_objects_moved_total",
+			Help: "Total number of objects moved by the rebalancer",
+		},
+		[]string{"strategy", "status"},
+	)
+
+	// RebalanceBytesMoved counts bytes moved by the rebalancer.
+	RebalanceBytesMoved = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_rebalance_bytes_moved_total",
+			Help: "Total bytes moved by the rebalancer",
+		},
+		[]string{"strategy"},
+	)
+
+	// RebalanceRunsTotal counts rebalancer executions.
+	RebalanceRunsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_rebalance_runs_total",
+			Help: "Total number of rebalancer runs",
+		},
+		[]string{"strategy", "status"},
+	)
+
+	// RebalanceDuration tracks rebalancer execution time.
+	RebalanceDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "s3proxy_rebalance_duration_seconds",
+			Help:    "Rebalancer execution time in seconds",
+			Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600},
+		},
+		[]string{"strategy"},
+	)
+
+	// RebalanceSkipped counts rebalancer runs that were skipped.
+	RebalanceSkipped = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_rebalance_skipped_total",
+			Help: "Total number of rebalancer runs skipped",
+		},
+		[]string{"reason"},
+	)
+
+	// --- Replication metrics ---
+
+	// ReplicationPending tracks objects currently below the target replication factor.
+	ReplicationPending = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_replication_pending",
+			Help: "Number of objects below the target replication factor",
+		},
+	)
+
+	// ReplicationCopiesCreatedTotal counts replica copies created.
+	ReplicationCopiesCreatedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "s3proxy_replication_copies_created_total",
+			Help: "Total number of replica copies created",
+		},
+	)
+
+	// ReplicationErrorsTotal counts replication errors.
+	ReplicationErrorsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "s3proxy_replication_errors_total",
+			Help: "Total number of replication errors",
+		},
+	)
+
+	// ReplicationDuration tracks replication worker cycle time.
+	ReplicationDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "s3proxy_replication_duration_seconds",
+			Help:    "Replication worker cycle time in seconds",
+			Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600},
+		},
+	)
+
+	// ReplicationRunsTotal counts replication worker executions.
+	ReplicationRunsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_replication_runs_total",
+			Help: "Total number of replication worker runs",
+		},
+		[]string{"status"},
+	)
+
 	// --- Info metric ---
 
 	// BuildInfo exposes version information.

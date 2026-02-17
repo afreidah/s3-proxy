@@ -14,6 +14,7 @@ package auth
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -24,6 +25,9 @@ import (
 
 	"github.com/munchbox/s3-proxy/internal/config"
 )
+
+// sigV4MaxSkew is the maximum allowed clock skew for SigV4 request timestamps.
+const sigV4MaxSkew = 15 * time.Minute
 
 // -------------------------------------------------------------------------
 // SIGV4 VERIFICATION
@@ -72,11 +76,18 @@ func VerifySigV4(r *http.Request, accessKeyID, secretAccessKey string) error {
 	signedHeaders := strings.Split(signedHeadersStr, ";")
 	canonicalRequest := buildCanonicalRequest(r, signedHeaders)
 
-	// Build string to sign
+	// Validate request timestamp to prevent replay attacks
 	amzDate := r.Header.Get("X-Amz-Date")
 	if amzDate == "" {
-		// Try to derive from date header
-		amzDate = time.Now().UTC().Format("20060102T150405Z")
+		return fmt.Errorf("missing X-Amz-Date header")
+	}
+
+	reqTime, err := time.Parse("20060102T150405Z", amzDate)
+	if err != nil {
+		return fmt.Errorf("malformed X-Amz-Date: %w", err)
+	}
+	if skew := time.Since(reqTime).Abs(); skew > sigV4MaxSkew {
+		return fmt.Errorf("request timestamp too skewed (%s)", skew.Truncate(time.Second))
 	}
 
 	credentialScope := fmt.Sprintf("%s/%s/%s/aws4_request", dateStamp, region, service)
@@ -157,7 +168,8 @@ func buildCanonicalRequest(r *http.Request, signedHeaders []string) string {
 	)
 }
 
-// buildCanonicalQueryString sorts query parameters and URI-encodes them.
+// buildCanonicalQueryString sorts query parameters and URI-encodes them per
+// the SigV4 spec (RFC 3986 encoding where spaces become %20, not +).
 func buildCanonicalQueryString(values url.Values) string {
 	if len(values) == 0 {
 		return ""
@@ -166,11 +178,18 @@ func buildCanonicalQueryString(values url.Values) string {
 	var params []string
 	for k, vs := range values {
 		for _, v := range vs {
-			params = append(params, url.QueryEscape(k)+"="+url.QueryEscape(v))
+			params = append(params, sigV4Encode(k)+"="+sigV4Encode(v))
 		}
 	}
 	sort.Strings(params)
 	return strings.Join(params, "&")
+}
+
+// sigV4Encode performs URI encoding per the SigV4 spec: RFC 3986 unreserved
+// characters (A-Z, a-z, 0-9, '-', '.', '_', '~') are not encoded, everything
+// else is percent-encoded. Unlike url.QueryEscape, spaces become %20 not +.
+func sigV4Encode(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 // deriveSigningKey computes the SigV4 signing key from the secret.
@@ -217,15 +236,19 @@ func Authenticate(r *http.Request, cfg config.AuthConfig) error {
 		return VerifySigV4(r, cfg.AccessKeyID, cfg.SecretAccessKey)
 	}
 
-	// Legacy token auth
+	// Legacy token auth (constant-time comparison to prevent timing attacks)
 	if cfg.Token != "" {
-		if proxyToken == cfg.Token {
+		if subtle.ConstantTimeCompare([]byte(proxyToken), []byte(cfg.Token)) == 1 {
 			return nil
 		}
 		return fmt.Errorf("invalid or missing authentication token")
 	}
 
-	// No auth configured
+	// If any auth method is configured but nothing matched, deny the request.
+	if cfg.AccessKeyID != "" || cfg.Token != "" {
+		return fmt.Errorf("missing authentication credentials")
+	}
+
 	return nil
 }
 

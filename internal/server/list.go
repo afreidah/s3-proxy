@@ -97,10 +97,7 @@ func (s *Server) handleListObjectsV2(ctx context.Context, w http.ResponseWriter,
 		xmlResult.CommonPrefixes = append(xmlResult.CommonPrefixes, xmlCommonPrefix{Prefix: cp})
 	}
 
-	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, xml.Header)
-	if err := xml.NewEncoder(w).Encode(xmlResult); err != nil {
+	if err := writeXML(w, http.StatusOK, xmlResult); err != nil {
 		return http.StatusOK, fmt.Errorf("failed to encode list response: %w", err)
 	}
 

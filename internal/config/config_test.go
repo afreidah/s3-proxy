@@ -1,7 +1,17 @@
+// -------------------------------------------------------------------------------
+// Configuration Tests - Validation and Defaults
+//
+// Project: Munchbox / Author: Alex Freidah
+//
+// Unit tests for configuration validation, default value application, duplicate
+// backend detection, and PostgreSQL connection string generation.
+// -------------------------------------------------------------------------------
+
 package config
 
 import (
 	"testing"
+	"time"
 )
 
 func TestConfigValidation_MinimalValid(t *testing.T) {
@@ -27,7 +37,7 @@ func TestConfigValidation_MinimalValid(t *testing.T) {
 		},
 	}
 
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
 		t.Errorf("valid config should pass validation: %v", err)
 	}
 
@@ -42,7 +52,7 @@ func TestConfigValidation_MinimalValid(t *testing.T) {
 
 func TestConfigValidation_MissingRequired(t *testing.T) {
 	cfg := Config{}
-	err := cfg.Validate()
+	err := cfg.SetDefaultsAndValidate()
 	if err == nil {
 		t.Error("empty config should fail validation")
 	}
@@ -58,7 +68,7 @@ func TestConfigValidation_DuplicateBackendNames(t *testing.T) {
 		},
 	}
 
-	err := cfg.Validate()
+	err := cfg.SetDefaultsAndValidate()
 	if err == nil {
 		t.Error("duplicate backend names should fail validation")
 	}
@@ -73,7 +83,7 @@ func TestConfigValidation_NegativeQuota(t *testing.T) {
 		},
 	}
 
-	err := cfg.Validate()
+	err := cfg.SetDefaultsAndValidate()
 	if err == nil {
 		t.Error("negative quota should fail validation")
 	}
@@ -90,8 +100,169 @@ func TestConnectionString(t *testing.T) {
 	}
 
 	got := db.ConnectionString()
-	want := "host=localhost port=5433 dbname=s3proxy user=s3proxy password=secret sslmode=require"
+	want := "postgres://s3proxy:secret@localhost:5433/s3proxy?sslmode=require"
 	if got != want {
 		t.Errorf("ConnectionString() = %q, want %q", got, want)
+	}
+}
+
+func TestConnectionString_SpecialChars(t *testing.T) {
+	db := DatabaseConfig{
+		Host:     "db.example.com",
+		Port:     5432,
+		Database: "mydb",
+		User:     "admin",
+		Password: "p@ss=w ord&special",
+		SSLMode:  "disable",
+	}
+
+	got := db.ConnectionString()
+	// url.UserPassword percent-encodes @ but preserves = and &
+	want := "postgres://admin:p%40ss=w%20ord&special@db.example.com:5432/mydb?sslmode=disable"
+	if got != want {
+		t.Errorf("ConnectionString() = %q, want %q", got, want)
+	}
+}
+
+func TestRebalanceConfig_Defaults(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Rebalance = RebalanceConfig{Enabled: true}
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Fatalf("valid rebalance config should pass: %v", err)
+	}
+
+	if cfg.Rebalance.Strategy != "pack" {
+		t.Errorf("strategy default = %q, want %q", cfg.Rebalance.Strategy, "pack")
+	}
+	if cfg.Rebalance.Interval != 6*time.Hour {
+		t.Errorf("interval default = %v, want %v", cfg.Rebalance.Interval, 6*time.Hour)
+	}
+	if cfg.Rebalance.BatchSize != 100 {
+		t.Errorf("batch_size default = %d, want 100", cfg.Rebalance.BatchSize)
+	}
+	if cfg.Rebalance.Threshold != 0.1 {
+		t.Errorf("threshold default = %f, want 0.1", cfg.Rebalance.Threshold)
+	}
+}
+
+func TestRebalanceConfig_InvalidStrategy(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Rebalance = RebalanceConfig{
+		Enabled:   true,
+		Strategy:  "invalid",
+		Interval:  time.Hour,
+		BatchSize: 10,
+		Threshold: 0.1,
+	}
+
+	if err := cfg.SetDefaultsAndValidate(); err == nil {
+		t.Error("invalid strategy should fail validation")
+	}
+}
+
+func TestRebalanceConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Rebalance = RebalanceConfig{
+		Enabled:  false,
+		Strategy: "garbage",
+	}
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Errorf("disabled rebalance should skip validation: %v", err)
+	}
+}
+
+func TestRebalanceConfig_InvalidThreshold(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Rebalance = RebalanceConfig{
+		Enabled:   true,
+		Strategy:  "spread",
+		Interval:  time.Hour,
+		BatchSize: 10,
+		Threshold: 1.5,
+	}
+
+	if err := cfg.SetDefaultsAndValidate(); err == nil {
+		t.Error("threshold > 1 should fail validation")
+	}
+}
+
+func TestReplicationConfig_DefaultsWhenDisabled(t *testing.T) {
+	cfg := validBaseConfig()
+	// factor=0 should default to 1 (disabled)
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Fatalf("disabled replication should pass: %v", err)
+	}
+
+	if cfg.Replication.Factor != 1 {
+		t.Errorf("factor default = %d, want 1", cfg.Replication.Factor)
+	}
+}
+
+func TestReplicationConfig_DefaultsWhenEnabled(t *testing.T) {
+	cfg := validBaseConfigTwoBackends()
+	cfg.Replication = ReplicationConfig{Factor: 2}
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Fatalf("valid replication config should pass: %v", err)
+	}
+
+	if cfg.Replication.WorkerInterval != 5*time.Minute {
+		t.Errorf("worker_interval default = %v, want %v", cfg.Replication.WorkerInterval, 5*time.Minute)
+	}
+	if cfg.Replication.BatchSize != 50 {
+		t.Errorf("batch_size default = %d, want 50", cfg.Replication.BatchSize)
+	}
+}
+
+func TestReplicationConfig_FactorExceedsBackends(t *testing.T) {
+	cfg := validBaseConfig() // 1 backend
+	cfg.Replication = ReplicationConfig{Factor: 2}
+
+	if err := cfg.SetDefaultsAndValidate(); err == nil {
+		t.Error("factor > backends should fail validation")
+	}
+}
+
+func TestReplicationConfig_FactorNegative(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Replication = ReplicationConfig{Factor: -1}
+
+	if err := cfg.SetDefaultsAndValidate(); err == nil {
+		t.Error("negative factor should fail validation")
+	}
+}
+
+func TestReplicationConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Replication = ReplicationConfig{Factor: 1, WorkerInterval: -1}
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Errorf("factor=1 should skip interval validation: %v", err)
+	}
+}
+
+// validBaseConfig returns a Config with all required fields populated (1 backend).
+func validBaseConfig() Config {
+	return Config{
+		Server:   ServerConfig{ListenAddr: ":9000", VirtualBucket: "b"},
+		Database: DatabaseConfig{Host: "h", Database: "d", User: "u"},
+		Backends: []BackendConfig{
+			{Name: "b1", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 1024},
+		},
+	}
+}
+
+// validBaseConfigTwoBackends returns a Config with 2 backends for replication tests.
+func validBaseConfigTwoBackends() Config {
+	return Config{
+		Server:   ServerConfig{ListenAddr: ":9000", VirtualBucket: "b"},
+		Database: DatabaseConfig{Host: "h", Database: "d", User: "u"},
+		Backends: []BackendConfig{
+			{Name: "b1", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 1024},
+			{Name: "b2", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 2048},
+		},
 	}
 }

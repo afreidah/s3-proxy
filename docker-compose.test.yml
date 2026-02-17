@@ -1,0 +1,60 @@
+# Integration test dependencies: MinIO x2 + PostgreSQL
+# Usage: docker compose -f docker-compose.test.yml up -d --wait
+
+services:
+  minio-1:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "19000:9000"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  minio-2:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "19002:9000"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_DB: s3proxy_test
+      POSTGRES_USER: s3proxy
+      POSTGRES_PASSWORD: s3proxy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U s3proxy -d s3proxy_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  minio-setup:
+    image: minio/mc
+    depends_on:
+      minio-1:
+        condition: service_healthy
+      minio-2:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set minio1 http://minio-1:9000 minioadmin minioadmin &&
+        mc alias set minio2 http://minio-2:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing minio1/backend1 &&
+        mc mb --ignore-existing minio2/backend2

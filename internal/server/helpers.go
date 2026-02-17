@@ -10,6 +10,7 @@
 package server
 
 import (
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,21 +39,32 @@ func parsePath(path string) (bucket string, key string, ok bool) {
 func writeS3Error(w http.ResponseWriter, code int, errCode, message string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(code)
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+	_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
 <Error>
   <Code>%s</Code>
   <Message>%s</Message>
 </Error>`, xmlEscape(errCode), xmlEscape(message))
 }
 
+// xmlReplacer escapes special XML characters. Allocated once at package level
+// to avoid per-call allocation.
+var xmlReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	`"`, "&quot;",
+	"'", "&apos;",
+)
+
 // xmlEscape escapes special XML characters.
 func xmlEscape(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&apos;",
-	)
-	return r.Replace(s)
+	return xmlReplacer.Replace(s)
+}
+
+// writeXML writes an S3-compatible XML response with the standard XML header.
+func writeXML(w http.ResponseWriter, status int, v any) error {
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprint(w, xml.Header)
+	return xml.NewEncoder(w).Encode(v)
 }

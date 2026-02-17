@@ -12,14 +12,17 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munchbox/s3-proxy/internal/config"
-	_ "github.com/lib/pq"
+	db "github.com/munchbox/s3-proxy/internal/storage/sqlc"
 )
 
 //go:embed migration.sql
@@ -35,6 +38,9 @@ var (
 
 	// ErrObjectNotFound is returned when an object is not in the location table.
 	ErrObjectNotFound = errors.New("object not found")
+
+	// ErrMultipartUploadNotFound is returned when a multipart upload ID is not found.
+	ErrMultipartUploadNotFound = errors.New("multipart upload not found")
 )
 
 // -------------------------------------------------------------------------
@@ -43,7 +49,8 @@ var (
 
 // Store manages quota and object location data in PostgreSQL.
 type Store struct {
-	db *sql.DB
+	pool    *pgxpool.Pool
+	queries *db.Queries
 }
 
 // QuotaStat holds quota statistics for a single backend.
@@ -52,6 +59,12 @@ type QuotaStat struct {
 	BytesUsed   int64
 	BytesLimit  int64
 	UpdatedAt   time.Time
+}
+
+// DeletedCopy holds information about a single deleted copy of an object.
+type DeletedCopy struct {
+	BackendName string
+	SizeBytes   int64
 }
 
 // ObjectLocation holds information about where an object is stored.
@@ -66,43 +79,101 @@ type ObjectLocation struct {
 // CONSTRUCTOR
 // -------------------------------------------------------------------------
 
-// NewStore creates a new PostgreSQL store connection.
-func NewStore(connStr string) (*Store, error) {
-	db, err := sql.Open("postgres", connStr)
+// NewStore creates a new PostgreSQL store connection using pgxpool.
+func NewStore(ctx context.Context, dbCfg config.DatabaseConfig) (*Store, error) {
+	cfg, err := pgxpool.ParseConfig(dbCfg.ConnectionString())
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to parse connection string: %w", err)
 	}
 
-	// Configure connection pool
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	cfg.MaxConns = dbCfg.MaxConns
+	cfg.MinConns = dbCfg.MinConns
+	cfg.MaxConnLifetime = dbCfg.MaxConnLifetime
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+	}
 
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{
+		pool:    pool,
+		queries: db.New(pool),
+	}, nil
 }
 
-// Close closes the database connection.
-func (s *Store) Close() error {
-	return s.db.Close()
+// Close closes the connection pool.
+func (s *Store) Close() {
+	s.pool.Close()
 }
 
 // RunMigrations applies the embedded schema DDL. All statements use IF NOT
 // EXISTS so this is safe to call on every startup.
 func (s *Store) RunMigrations(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, migrationSQL)
+	_, err := s.pool.Exec(ctx, migrationSQL)
 	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 	return nil
+}
+
+// -------------------------------------------------------------------------
+// TRANSACTION HELPERS
+// -------------------------------------------------------------------------
+
+// withTx executes fn within a transaction, committing on success or rolling
+// back on error.
+func (s *Store) withTx(ctx context.Context, fn func(*db.Queries) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := fn(s.queries.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// withTxVal executes fn within a transaction and returns its result,
+// committing on success or rolling back on error.
+func withTxVal[T any](s *Store, ctx context.Context, fn func(*db.Queries) (T, error)) (T, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		var zero T
+		return zero, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	val, err := fn(s.queries.WithTx(tx))
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		var zero T
+		return zero, fmt.Errorf("failed to commit: %w", err)
+	}
+	return val, nil
+}
+
+// toObjectLocations converts sqlc ObjectLocation rows to storage ObjectLocations.
+func toObjectLocations(rows []db.ObjectLocation) []ObjectLocation {
+	out := make([]ObjectLocation, len(rows))
+	for i, row := range rows {
+		out[i] = ObjectLocation{
+			ObjectKey:   row.ObjectKey,
+			BackendName: row.BackendName,
+			SizeBytes:   row.SizeBytes,
+			CreatedAt:   row.CreatedAt.Time,
+		}
+	}
+	return out
 }
 
 // -------------------------------------------------------------------------
@@ -113,14 +184,10 @@ func (s *Store) RunMigrations(ctx context.Context) error {
 // backends with their quota limits. Creates new entries or updates existing limits.
 func (s *Store) SyncQuotaLimits(ctx context.Context, backends []config.BackendConfig) error {
 	for _, b := range backends {
-		_, err := s.db.ExecContext(ctx, `
-			INSERT INTO backend_quotas (backend_name, bytes_limit, bytes_used, updated_at)
-			VALUES ($1, $2, 0, NOW())
-			ON CONFLICT (backend_name) DO UPDATE SET
-				bytes_limit = $2,
-				updated_at = NOW()
-		`, b.Name, b.QuotaBytes)
-
+		err := s.queries.UpsertQuotaLimit(ctx, db.UpsertQuotaLimitParams{
+			BackendName: b.Name,
+			BytesLimit:  b.QuotaBytes,
+		})
 		if err != nil {
 			return fmt.Errorf("failed to sync quota for backend %s: %w", b.Name, err)
 		}
@@ -131,16 +198,9 @@ func (s *Store) SyncQuotaLimits(ctx context.Context, backends []config.BackendCo
 // GetBackendWithSpace finds a backend with enough quota for the given size.
 // Returns the backend name or ErrNoSpaceAvailable if none have enough space.
 func (s *Store) GetBackendWithSpace(ctx context.Context, size int64, backendOrder []string) (string, error) {
-	// Query backends in the configured order
 	for _, name := range backendOrder {
-		var available int64
-		err := s.db.QueryRowContext(ctx, `
-			SELECT bytes_limit - bytes_used
-			FROM backend_quotas
-			WHERE backend_name = $1
-		`, name).Scan(&available)
-
-		if err == sql.ErrNoRows {
+		available, err := s.queries.GetBackendAvailableSpace(ctx, name)
+		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
 		if err != nil {
@@ -157,74 +217,51 @@ func (s *Store) GetBackendWithSpace(ctx context.Context, size int64, backendOrde
 
 // GetQuotaStats returns quota statistics for all backends.
 func (s *Store) GetQuotaStats(ctx context.Context) (map[string]QuotaStat, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT backend_name, bytes_used, bytes_limit, updated_at
-		FROM backend_quotas
-	`)
+	rows, err := s.queries.GetAllQuotaStats(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query quota stats: %w", err)
 	}
-	defer rows.Close()
 
 	stats := make(map[string]QuotaStat)
-	for rows.Next() {
-		var stat QuotaStat
-		if err := rows.Scan(&stat.BackendName, &stat.BytesUsed, &stat.BytesLimit, &stat.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan quota row: %w", err)
+	for _, row := range rows {
+		stats[row.BackendName] = QuotaStat{
+			BackendName: row.BackendName,
+			BytesUsed:   row.BytesUsed,
+			BytesLimit:  row.BytesLimit,
+			UpdatedAt:   row.UpdatedAt.Time,
 		}
-		stats[stat.BackendName] = stat
 	}
 
-	return stats, rows.Err()
+	return stats, nil
 }
 
 // GetObjectCounts returns the number of objects stored on each backend.
 func (s *Store) GetObjectCounts(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT backend_name, COUNT(*)
-		FROM object_locations
-		GROUP BY backend_name
-	`)
+	rows, err := s.queries.GetObjectCountsByBackend(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query object counts: %w", err)
 	}
-	defer rows.Close()
 
 	counts := make(map[string]int64)
-	for rows.Next() {
-		var name string
-		var count int64
-		if err := rows.Scan(&name, &count); err != nil {
-			return nil, fmt.Errorf("failed to scan object count: %w", err)
-		}
-		counts[name] = count
+	for _, row := range rows {
+		counts[row.BackendName] = row.ObjectCount
 	}
-	return counts, rows.Err()
+	return counts, nil
 }
 
 // GetActiveMultipartCounts returns the number of in-progress multipart uploads
 // per backend.
 func (s *Store) GetActiveMultipartCounts(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT backend_name, COUNT(*)
-		FROM multipart_uploads
-		GROUP BY backend_name
-	`)
+	rows, err := s.queries.GetActiveMultipartCountsByBackend(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query multipart counts: %w", err)
 	}
-	defer rows.Close()
 
 	counts := make(map[string]int64)
-	for rows.Next() {
-		var name string
-		var count int64
-		if err := rows.Scan(&name, &count); err != nil {
-			return nil, fmt.Errorf("failed to scan multipart count: %w", err)
-		}
-		counts[name] = count
+	for _, row := range rows {
+		counts[row.BackendName] = row.UploadCount
 	}
-	return counts, rows.Err()
+	return counts, nil
 }
 
 // -------------------------------------------------------------------------
@@ -232,130 +269,168 @@ func (s *Store) GetActiveMultipartCounts(ctx context.Context) (map[string]int64,
 // -------------------------------------------------------------------------
 
 // RecordObject records an object's location and updates the backend quota.
-// This is done atomically in a transaction.
+// On overwrite, all existing copies (including replicas) are removed and their
+// quotas decremented before inserting the new primary copy.
 func (s *Store) RecordObject(ctx context.Context, key, backend string, size int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Check if object already exists (overwrite case)
-	var existingBackend string
-	var existingSize int64
-	err = tx.QueryRowContext(ctx, `
-		SELECT backend_name, size_bytes FROM object_locations WHERE object_key = $1
-	`, key).Scan(&existingBackend, &existingSize)
-
-	if err == nil {
-		// Object exists - remove old quota usage
-		_, err = tx.ExecContext(ctx, `
-			UPDATE backend_quotas
-			SET bytes_used = bytes_used - $1, updated_at = NOW()
-			WHERE backend_name = $2
-		`, existingSize, existingBackend)
+	return s.withTx(ctx, func(qtx *db.Queries) error {
+		// --- Collect all existing copies for this key ---
+		existing, err := qtx.GetExistingCopiesForUpdate(ctx, key)
 		if err != nil {
-			return fmt.Errorf("failed to decrement old quota: %w", err)
+			return fmt.Errorf("failed to query existing copies: %w", err)
 		}
 
-		// Update location to new backend
-		_, err = tx.ExecContext(ctx, `
-			UPDATE object_locations
-			SET backend_name = $1, size_bytes = $2, created_at = NOW()
-			WHERE object_key = $3
-		`, backend, size, key)
-		if err != nil {
-			return fmt.Errorf("failed to update object location: %w", err)
+		// --- Delete all existing copies and decrement their quotas ---
+		if len(existing) > 0 {
+			if err := qtx.DeleteObjectCopies(ctx, key); err != nil {
+				return fmt.Errorf("failed to delete existing copies: %w", err)
+			}
+
+			for _, ec := range existing {
+				if err := qtx.DecrementQuota(ctx, db.DecrementQuotaParams{
+					Amount:      ec.SizeBytes,
+					BackendName: ec.BackendName,
+				}); err != nil {
+					return fmt.Errorf("failed to decrement quota for %s: %w", ec.BackendName, err)
+				}
+			}
 		}
-	} else if err == sql.ErrNoRows {
-		// New object - insert location
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO object_locations (object_key, backend_name, size_bytes, created_at)
-			VALUES ($1, $2, $3, NOW())
-		`, key, backend, size)
-		if err != nil {
+
+		// --- Insert new primary copy ---
+		if err := qtx.InsertObjectLocation(ctx, db.InsertObjectLocationParams{
+			ObjectKey:   key,
+			BackendName: backend,
+			SizeBytes:   size,
+		}); err != nil {
 			return fmt.Errorf("failed to insert object location: %w", err)
 		}
-	} else {
-		return fmt.Errorf("failed to check existing object: %w", err)
-	}
 
-	// Update quota for new backend
-	_, err = tx.ExecContext(ctx, `
-		UPDATE backend_quotas
-		SET bytes_used = bytes_used + $1, updated_at = NOW()
-		WHERE backend_name = $2
-	`, size, backend)
-	if err != nil {
-		return fmt.Errorf("failed to update quota: %w", err)
-	}
+		// --- Increment quota for new backend ---
+		if err := qtx.IncrementQuota(ctx, db.IncrementQuotaParams{
+			Amount:      size,
+			BackendName: backend,
+		}); err != nil {
+			return fmt.Errorf("failed to update quota: %w", err)
+		}
 
-	return tx.Commit()
+		return nil
+	})
 }
 
-// GetObjectLocation finds which backend stores the given object.
-func (s *Store) GetObjectLocation(ctx context.Context, key string) (*ObjectLocation, error) {
-	var loc ObjectLocation
-	err := s.db.QueryRowContext(ctx, `
-		SELECT object_key, backend_name, size_bytes, created_at
-		FROM object_locations
-		WHERE object_key = $1
-	`, key).Scan(&loc.ObjectKey, &loc.BackendName, &loc.SizeBytes, &loc.CreatedAt)
+// DeleteObject removes all copies of an object and decrements their quotas.
+// Returns all deleted copies, or ErrObjectNotFound if the object doesn't exist.
+func (s *Store) DeleteObject(ctx context.Context, key string) ([]DeletedCopy, error) {
+	return withTxVal(s, ctx, func(qtx *db.Queries) ([]DeletedCopy, error) {
+		// --- Get all copies ---
+		existing, err := qtx.GetExistingCopiesForUpdate(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get object locations: %w", err)
+		}
 
-	if err == sql.ErrNoRows {
-		return nil, ErrObjectNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get object location: %w", err)
-	}
+		if len(existing) == 0 {
+			return nil, ErrObjectNotFound
+		}
 
-	return &loc, nil
+		// --- Delete all location records ---
+		if err := qtx.DeleteObjectCopies(ctx, key); err != nil {
+			return nil, fmt.Errorf("failed to delete object locations: %w", err)
+		}
+
+		// --- Decrement quota for each backend ---
+		copies := make([]DeletedCopy, len(existing))
+		for i, ec := range existing {
+			copies[i] = DeletedCopy{
+				BackendName: ec.BackendName,
+				SizeBytes:   ec.SizeBytes,
+			}
+			if err := qtx.DecrementQuota(ctx, db.DecrementQuotaParams{
+				Amount:      ec.SizeBytes,
+				BackendName: ec.BackendName,
+			}); err != nil {
+				return nil, fmt.Errorf("failed to decrement quota for %s: %w", ec.BackendName, err)
+			}
+		}
+
+		return copies, nil
+	})
 }
 
-// DeleteObject removes an object's location record and decrements the quota.
-// Returns the backend name and size for the deleted object, or ErrObjectNotFound.
-func (s *Store) DeleteObject(ctx context.Context, key string) (backend string, size int64, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+// ListObjectsByBackend returns objects stored on a specific backend, ordered by
+// size ascending (smallest first). Used by the rebalancer to find movable objects.
+func (s *Store) ListObjectsByBackend(ctx context.Context, backendName string, limit int) ([]ObjectLocation, error) {
+	rows, err := s.queries.ListObjectsByBackend(ctx, db.ListObjectsByBackendParams{
+		BackendName: backendName,
+		Limit:       int32(limit),
+	})
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, fmt.Errorf("failed to list objects by backend: %w", err)
 	}
-	defer tx.Rollback()
+	return toObjectLocations(rows), nil
+}
 
-	// Get object info
-	err = tx.QueryRowContext(ctx, `
-		SELECT backend_name, size_bytes FROM object_locations WHERE object_key = $1
-	`, key).Scan(&backend, &size)
+// MoveObjectLocation atomically moves a copy of an object from one backend to
+// another. Uses SELECT FOR UPDATE to prevent races. Returns (0, nil) if the
+// source copy is gone or the target already has a copy.
+func (s *Store) MoveObjectLocation(ctx context.Context, key, fromBackend, toBackend string) (int64, error) {
+	return withTxVal(s, ctx, func(qtx *db.Queries) (int64, error) {
+		// --- Check if target backend already has a copy ---
+		exists, err := qtx.CheckObjectExistsOnBackend(ctx, db.CheckObjectExistsOnBackendParams{
+			ObjectKey:   key,
+			BackendName: toBackend,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("failed to check target: %w", err)
+		}
+		if exists {
+			return 0, nil
+		}
 
-	if err == sql.ErrNoRows {
-		return "", 0, ErrObjectNotFound
-	}
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to get object location: %w", err)
-	}
+		// --- Lock the source row and verify it still belongs to the source ---
+		sizeBytes, err := qtx.LockObjectOnBackend(ctx, db.LockObjectOnBackendParams{
+			ObjectKey:   key,
+			BackendName: fromBackend,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, fmt.Errorf("failed to lock object: %w", err)
+		}
 
-	// Delete location record
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM object_locations WHERE object_key = $1
-	`, key)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to delete object location: %w", err)
-	}
+		// --- Delete source row ---
+		if err := qtx.DeleteObjectFromBackend(ctx, db.DeleteObjectFromBackendParams{
+			ObjectKey:   key,
+			BackendName: fromBackend,
+		}); err != nil {
+			return 0, fmt.Errorf("failed to delete source location: %w", err)
+		}
 
-	// Decrement quota
-	_, err = tx.ExecContext(ctx, `
-		UPDATE backend_quotas
-		SET bytes_used = bytes_used - $1, updated_at = NOW()
-		WHERE backend_name = $2
-	`, size, backend)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to decrement quota: %w", err)
-	}
+		// --- Insert destination row ---
+		if err := qtx.InsertObjectLocation(ctx, db.InsertObjectLocationParams{
+			ObjectKey:   key,
+			BackendName: toBackend,
+			SizeBytes:   sizeBytes,
+		}); err != nil {
+			return 0, fmt.Errorf("failed to insert destination location: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return "", 0, fmt.Errorf("failed to commit: %w", err)
-	}
+		// --- Decrement source quota ---
+		if err := qtx.DecrementQuota(ctx, db.DecrementQuotaParams{
+			Amount:      sizeBytes,
+			BackendName: fromBackend,
+		}); err != nil {
+			return 0, fmt.Errorf("failed to decrement source quota: %w", err)
+		}
 
-	return backend, size, nil
+		// --- Increment destination quota ---
+		if err := qtx.IncrementQuota(ctx, db.IncrementQuotaParams{
+			Amount:      sizeBytes,
+			BackendName: toBackend,
+		}); err != nil {
+			return 0, fmt.Errorf("failed to increment destination quota: %w", err)
+		}
+
+		return sizeBytes, nil
+	})
 }
 
 // ListObjectsResult holds the result of a list objects query.
@@ -373,31 +448,20 @@ func (s *Store) ListObjects(ctx context.Context, prefix, startAfter string, maxK
 		maxKeys = 1000
 	}
 
+	// --- Escape LIKE wildcards in prefix ---
+	escapedPrefix := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+
 	// Fetch one extra to detect truncation
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT object_key, backend_name, size_bytes, created_at
-		FROM object_locations
-		WHERE object_key LIKE $1 || '%'
-		  AND object_key > $2
-		ORDER BY object_key
-		LIMIT $3
-	`, prefix, startAfter, maxKeys+1)
+	rows, err := s.queries.ListObjectsByPrefix(ctx, db.ListObjectsByPrefixParams{
+		Prefix:     escapedPrefix,
+		StartAfter: startAfter,
+		MaxKeys:    int32(maxKeys + 1),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list objects: %w", err)
 	}
-	defer rows.Close()
 
-	var objects []ObjectLocation
-	for rows.Next() {
-		var loc ObjectLocation
-		if err := rows.Scan(&loc.ObjectKey, &loc.BackendName, &loc.SizeBytes, &loc.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan object row: %w", err)
-		}
-		objects = append(objects, loc)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate objects: %w", err)
-	}
+	objects := toObjectLocations(rows)
 
 	result := &ListObjectsResult{}
 	if len(objects) > maxKeys {
@@ -409,6 +473,75 @@ func (s *Store) ListObjects(ctx context.Context, prefix, startAfter string, maxK
 	}
 
 	return result, nil
+}
+
+// -------------------------------------------------------------------------
+// REPLICATION OPERATIONS
+// -------------------------------------------------------------------------
+
+// GetAllObjectLocations returns all copies of an object, ordered by created_at
+// ascending (oldest/primary first). Used for read failover.
+func (s *Store) GetAllObjectLocations(ctx context.Context, key string) ([]ObjectLocation, error) {
+	rows, err := s.queries.GetAllObjectLocations(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get object locations: %w", err)
+	}
+
+	if len(rows) == 0 {
+		return nil, ErrObjectNotFound
+	}
+
+	return toObjectLocations(rows), nil
+}
+
+// GetUnderReplicatedObjects finds objects with fewer copies than the target
+// replication factor. Returns all rows for those objects so callers know which
+// backends already have copies.
+func (s *Store) GetUnderReplicatedObjects(ctx context.Context, factor, limit int) ([]ObjectLocation, error) {
+	rows, err := s.queries.GetUnderReplicatedObjects(ctx, db.GetUnderReplicatedObjectsParams{
+		Factor:  int64(factor),
+		MaxKeys: int32(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query under-replicated objects: %w", err)
+	}
+
+	return toObjectLocations(rows), nil
+}
+
+// RecordReplica inserts a replica copy of an object, but only if the source
+// copy still exists. This prevents stale replicas when an object is overwritten
+// or deleted during the (potentially slow) replication copy. Returns true if
+// the replica was inserted, false if skipped.
+func (s *Store) RecordReplica(ctx context.Context, key, targetBackend, sourceBackend string, size int64) (bool, error) {
+	return withTxVal(s, ctx, func(qtx *db.Queries) (bool, error) {
+		// --- Conditional insert: only if source copy still exists ---
+		inserted, err := qtx.InsertReplicaConditional(ctx, db.InsertReplicaConditionalParams{
+			ObjectKey:     key,
+			BackendName:   targetBackend,
+			BackendName_2: sourceBackend,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("failed to insert replica: %w", err)
+		}
+
+		if !inserted {
+			return false, nil
+		}
+
+		// --- Increment quota for target backend ---
+		if err := qtx.IncrementQuota(ctx, db.IncrementQuotaParams{
+			Amount:      size,
+			BackendName: targetBackend,
+		}); err != nil {
+			return false, fmt.Errorf("failed to update quota: %w", err)
+		}
+
+		return true, nil
+	})
 }
 
 // -------------------------------------------------------------------------
@@ -434,10 +567,12 @@ type MultipartPart struct {
 
 // CreateMultipartUpload records a new multipart upload in the database.
 func (s *Store) CreateMultipartUpload(ctx context.Context, uploadID, key, backend, contentType string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO multipart_uploads (upload_id, object_key, backend_name, content_type, created_at)
-		VALUES ($1, $2, $3, $4, NOW())
-	`, uploadID, key, backend, contentType)
+	err := s.queries.CreateMultipartUpload(ctx, db.CreateMultipartUploadParams{
+		UploadID:    uploadID,
+		ObjectKey:   key,
+		BackendName: backend,
+		ContentType: &contentType,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create multipart upload: %w", err)
 	}
@@ -446,30 +581,36 @@ func (s *Store) CreateMultipartUpload(ctx context.Context, uploadID, key, backen
 
 // GetMultipartUpload retrieves metadata for a multipart upload.
 func (s *Store) GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error) {
-	var mu MultipartUpload
-	err := s.db.QueryRowContext(ctx, `
-		SELECT upload_id, object_key, backend_name, content_type, created_at
-		FROM multipart_uploads
-		WHERE upload_id = $1
-	`, uploadID).Scan(&mu.UploadID, &mu.ObjectKey, &mu.BackendName, &mu.ContentType, &mu.CreatedAt)
-
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("multipart upload %s not found", uploadID)
+	row, err := s.queries.GetMultipartUpload(ctx, uploadID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrMultipartUploadNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get multipart upload: %w", err)
 	}
-	return &mu, nil
+
+	ct := ""
+	if row.ContentType != nil {
+		ct = *row.ContentType
+	}
+
+	return &MultipartUpload{
+		UploadID:    row.UploadID,
+		ObjectKey:   row.ObjectKey,
+		BackendName: row.BackendName,
+		ContentType: ct,
+		CreatedAt:   row.CreatedAt.Time,
+	}, nil
 }
 
 // RecordPart records a completed part for a multipart upload.
 func (s *Store) RecordPart(ctx context.Context, uploadID string, partNumber int, etag string, size int64) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes, created_at)
-		VALUES ($1, $2, $3, $4, NOW())
-		ON CONFLICT (upload_id, part_number) DO UPDATE SET
-			etag = $3, size_bytes = $4, created_at = NOW()
-	`, uploadID, partNumber, etag, size)
+	err := s.queries.UpsertPart(ctx, db.UpsertPartParams{
+		UploadID:   uploadID,
+		PartNumber: int32(partNumber),
+		Etag:       etag,
+		SizeBytes:  size,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to record part: %w", err)
 	}
@@ -478,33 +619,26 @@ func (s *Store) RecordPart(ctx context.Context, uploadID string, partNumber int,
 
 // GetParts returns all parts for a multipart upload, ordered by part number.
 func (s *Store) GetParts(ctx context.Context, uploadID string) ([]MultipartPart, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT part_number, etag, size_bytes, created_at
-		FROM multipart_parts
-		WHERE upload_id = $1
-		ORDER BY part_number
-	`, uploadID)
+	rows, err := s.queries.GetParts(ctx, uploadID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get parts: %w", err)
 	}
-	defer rows.Close()
 
-	var parts []MultipartPart
-	for rows.Next() {
-		var p MultipartPart
-		if err := rows.Scan(&p.PartNumber, &p.ETag, &p.SizeBytes, &p.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan part: %w", err)
+	parts := make([]MultipartPart, len(rows))
+	for i, row := range rows {
+		parts[i] = MultipartPart{
+			PartNumber: int(row.PartNumber),
+			ETag:       row.Etag,
+			SizeBytes:  row.SizeBytes,
+			CreatedAt:  row.CreatedAt.Time,
 		}
-		parts = append(parts, p)
 	}
-	return parts, rows.Err()
+	return parts, nil
 }
 
 // DeleteMultipartUpload removes a multipart upload and its parts (cascading).
 func (s *Store) DeleteMultipartUpload(ctx context.Context, uploadID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM multipart_uploads WHERE upload_id = $1
-	`, uploadID)
+	err := s.queries.DeleteMultipartUpload(ctx, uploadID)
 	if err != nil {
 		return fmt.Errorf("failed to delete multipart upload: %w", err)
 	}
@@ -514,23 +648,66 @@ func (s *Store) DeleteMultipartUpload(ctx context.Context, uploadID string) erro
 // GetStaleMultipartUploads returns uploads older than the given duration.
 func (s *Store) GetStaleMultipartUploads(ctx context.Context, olderThan time.Duration) ([]MultipartUpload, error) {
 	cutoff := time.Now().Add(-olderThan)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT upload_id, object_key, backend_name, content_type, created_at
-		FROM multipart_uploads
-		WHERE created_at < $1
-	`, cutoff)
+	rows, err := s.queries.GetStaleMultipartUploads(ctx, pgTimestamptz(cutoff))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stale uploads: %w", err)
 	}
-	defer rows.Close()
 
-	var uploads []MultipartUpload
-	for rows.Next() {
-		var mu MultipartUpload
-		if err := rows.Scan(&mu.UploadID, &mu.ObjectKey, &mu.BackendName, &mu.ContentType, &mu.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan upload: %w", err)
+	uploads := make([]MultipartUpload, len(rows))
+	for i, row := range rows {
+		ct := ""
+		if row.ContentType != nil {
+			ct = *row.ContentType
 		}
-		uploads = append(uploads, mu)
+		uploads[i] = MultipartUpload{
+			UploadID:    row.UploadID,
+			ObjectKey:   row.ObjectKey,
+			BackendName: row.BackendName,
+			ContentType: ct,
+			CreatedAt:   row.CreatedAt.Time,
+		}
 	}
-	return uploads, rows.Err()
+	return uploads, nil
+}
+
+// -------------------------------------------------------------------------
+// SYNC OPERATIONS
+// -------------------------------------------------------------------------
+
+// ImportObject records a pre-existing object in the database without overwriting.
+// Returns true if the object was imported, false if it already existed for this
+// backend. Used by the sync subcommand to bring existing bucket objects under
+// proxy management.
+func (s *Store) ImportObject(ctx context.Context, key, backend string, size int64) (bool, error) {
+	return withTxVal(s, ctx, func(qtx *db.Queries) (bool, error) {
+		inserted, err := qtx.InsertObjectLocationIfNotExists(ctx, db.InsertObjectLocationIfNotExistsParams{
+			ObjectKey:   key,
+			BackendName: backend,
+			SizeBytes:   size,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("failed to import object %s: %w", key, err)
+		}
+
+		if !inserted {
+			return false, nil
+		}
+
+		if err := qtx.IncrementQuota(ctx, db.IncrementQuotaParams{
+			Amount:      size,
+			BackendName: backend,
+		}); err != nil {
+			return false, fmt.Errorf("failed to increment quota for %s: %w", backend, err)
+		}
+
+		return true, nil
+	})
+}
+
+// pgTimestamptz converts a time.Time to pgtype.Timestamptz for use with sqlc.
+func pgTimestamptz(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
 }

@@ -11,6 +11,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -31,7 +32,7 @@ import (
 // ObjectBackend defines the interface for object storage operations.
 type ObjectBackend interface {
 	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (etag string, err error)
-	GetObject(ctx context.Context, key string) (body io.ReadCloser, size int64, contentType string, etag string, err error)
+	GetObject(ctx context.Context, key string, rangeHeader string) (body io.ReadCloser, size int64, contentType string, etag string, contentRange string, err error)
 	HeadObject(ctx context.Context, key string) (size int64, contentType string, etag string, err error)
 	DeleteObject(ctx context.Context, key string) error
 }
@@ -82,10 +83,24 @@ func (b *S3Backend) PutObject(ctx context.Context, key string, body io.Reader, s
 	)
 	defer span.End()
 
+	// The AWS SDK requires a seekable body to compute the SigV4 payload hash.
+	// HTTP request bodies are not seekable, so buffer when necessary.
+	var seekableBody io.ReadSeeker
+	if rs, ok := body.(io.ReadSeeker); ok {
+		seekableBody = rs
+	} else {
+		data, err := io.ReadAll(body)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return "", fmt.Errorf("failed to read body: %w", err)
+		}
+		seekableBody = bytes.NewReader(data)
+	}
+
 	input := &s3.PutObjectInput{
 		Bucket:        aws.String(b.bucket),
 		Key:           aws.String(key),
-		Body:          body,
+		Body:          seekableBody,
 		ContentLength: aws.Int64(size),
 	}
 
@@ -111,8 +126,10 @@ func (b *S3Backend) PutObject(ctx context.Context, key string, body io.Reader, s
 	return etag, nil
 }
 
-// GetObject retrieves an object from the backend.
-func (b *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, string, string, error) {
+// GetObject retrieves an object from the backend. When rangeHeader is non-empty
+// (e.g. "bytes=0-99"), it is passed through to S3 and the response includes a
+// contentRange value (e.g. "bytes 0-99/1000") for 206 Partial Content responses.
+func (b *S3Backend) GetObject(ctx context.Context, key string, rangeHeader string) (io.ReadCloser, int64, string, string, string, error) {
 	const operation = "GetObject"
 	start := time.Now()
 
@@ -122,10 +139,15 @@ func (b *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, i
 	)
 	defer span.End()
 
-	result, err := b.client.GetObject(ctx, &s3.GetObjectInput{
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	if rangeHeader != "" {
+		input.Range = aws.String(rangeHeader)
+	}
+
+	result, err := b.client.GetObject(ctx, input)
 
 	// --- Record metrics ---
 	b.recordOperation(operation, start, err)
@@ -133,7 +155,7 @@ func (b *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, i
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-		return nil, 0, "", "", fmt.Errorf("get object failed: %w", err)
+		return nil, 0, "", "", "", fmt.Errorf("get object failed: %w", err)
 	}
 
 	size := int64(0)
@@ -151,7 +173,12 @@ func (b *S3Backend) GetObject(ctx context.Context, key string) (io.ReadCloser, i
 		etag = *result.ETag
 	}
 
-	return result.Body, size, contentType, etag, nil
+	contentRange := ""
+	if result.ContentRange != nil {
+		contentRange = *result.ContentRange
+	}
+
+	return result.Body, size, contentType, etag, contentRange, nil
 }
 
 // HeadObject retrieves object metadata without the body.
@@ -221,6 +248,61 @@ func (b *S3Backend) DeleteObject(ctx context.Context, key string) error {
 		span.RecordError(err)
 		return fmt.Errorf("delete object failed: %w", err)
 	}
+	return nil
+}
+
+// -------------------------------------------------------------------------
+// LISTING
+// -------------------------------------------------------------------------
+
+// ListedObject holds metadata for a single object returned by S3 ListObjects.
+type ListedObject struct {
+	Key       string
+	SizeBytes int64
+}
+
+// ListObjects iterates all objects in the backend bucket with the given prefix,
+// calling fn for each page of results. Uses ListObjectsV2 pagination internally.
+func (b *S3Backend) ListObjects(ctx context.Context, prefix string, fn func([]ListedObject) error) error {
+	const operation = "ListObjectsV2"
+
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(b.bucket),
+	}
+	if prefix != "" {
+		input.Prefix = aws.String(prefix)
+	}
+
+	paginator := s3.NewListObjectsV2Paginator(b.client, input)
+	for paginator.HasMorePages() {
+		start := time.Now()
+		page, err := paginator.NextPage(ctx)
+		b.recordOperation(operation, start, err)
+
+		if err != nil {
+			return fmt.Errorf("list objects failed: %w", err)
+		}
+
+		objects := make([]ListedObject, len(page.Contents))
+		for i, obj := range page.Contents {
+			key := ""
+			if obj.Key != nil {
+				key = *obj.Key
+			}
+			size := int64(0)
+			if obj.Size != nil {
+				size = *obj.Size
+			}
+			objects[i] = ListedObject{Key: key, SizeBytes: size}
+		}
+
+		if len(objects) > 0 {
+			if err := fn(objects); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 

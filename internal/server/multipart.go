@@ -14,7 +14,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -95,10 +95,9 @@ func (s *Server) handleCreateMultipartUpload(ctx context.Context, w http.Respons
 		UploadId: uploadID,
 	}
 
-	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, xml.Header)
-	xml.NewEncoder(w).Encode(result)
+	if err := writeXML(w, http.StatusOK, result); err != nil {
+		return http.StatusOK, fmt.Errorf("failed to encode create multipart response: %w", err)
+	}
 	return http.StatusOK, nil
 }
 
@@ -116,6 +115,15 @@ func (s *Server) handleUploadPart(ctx context.Context, w http.ResponseWriter, r 
 	if r.ContentLength < 0 {
 		writeS3Error(w, http.StatusLengthRequired, "MissingContentLength", "Content-Length required")
 		return http.StatusLengthRequired, fmt.Errorf("missing Content-Length for part upload")
+	}
+
+	if s.MaxObjectSize > 0 && r.ContentLength > s.MaxObjectSize {
+		writeS3Error(w, http.StatusRequestEntityTooLarge, "EntityTooLarge", "Part size exceeds the maximum allowed size")
+		return http.StatusRequestEntityTooLarge, fmt.Errorf("part size %d exceeds max %d", r.ContentLength, s.MaxObjectSize)
+	}
+
+	if s.MaxObjectSize > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, s.MaxObjectSize)
 	}
 
 	etag, err := s.Manager.UploadPart(ctx, uploadID, partNumber, r.Body, r.ContentLength)
@@ -157,10 +165,9 @@ func (s *Server) handleCompleteMultipartUpload(ctx context.Context, w http.Respo
 		ETag:   etag,
 	}
 
-	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, xml.Header)
-	xml.NewEncoder(w).Encode(result)
+	if err := writeXML(w, http.StatusOK, result); err != nil {
+		return http.StatusOK, fmt.Errorf("failed to encode complete multipart response: %w", err)
+	}
 	return http.StatusOK, nil
 }
 
@@ -168,7 +175,7 @@ func (s *Server) handleCompleteMultipartUpload(ctx context.Context, w http.Respo
 func (s *Server) handleAbortMultipartUpload(ctx context.Context, w http.ResponseWriter, uploadID string) (int, error) {
 	err := s.Manager.AbortMultipartUpload(ctx, uploadID)
 	if err != nil {
-		log.Printf("Abort multipart upload %s failed: %v", uploadID, err)
+		slog.Error("Abort multipart upload failed", "upload_id", uploadID, "error", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -201,9 +208,8 @@ func (s *Server) handleListParts(ctx context.Context, w http.ResponseWriter, r *
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, xml.Header)
-	xml.NewEncoder(w).Encode(result)
+	if err := writeXML(w, http.StatusOK, result); err != nil {
+		return http.StatusOK, fmt.Errorf("failed to encode list parts response: %w", err)
+	}
 	return http.StatusOK, nil
 }

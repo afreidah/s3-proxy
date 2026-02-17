@@ -14,7 +14,7 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -36,6 +36,7 @@ type Server struct {
 	Manager       *storage.BackendManager
 	VirtualBucket string
 	AuthConfig    config.AuthConfig
+	MaxObjectSize int64 // Max upload body size in bytes
 }
 
 // ServeHTTP implements http.Handler.
@@ -51,7 +52,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if auth.NeedsAuth(s.AuthConfig) {
 		if err := auth.Authenticate(r, s.AuthConfig); err != nil {
 			s.recordRequest(method, http.StatusForbidden, start, 0, 0)
-			log.Printf("[%s] %s %s - 403 Forbidden (%v)", method, r.URL.Path, r.RemoteAddr, err)
+			slog.Warn("Auth failed", "method", method, "path", r.URL.Path, "remote", r.RemoteAddr, "error", err)
 			writeS3Error(w, http.StatusForbidden, "AccessDenied", "Access denied")
 			return
 		}
@@ -61,7 +62,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bucket, key, ok := parsePath(r.URL.Path)
 	if !ok {
 		s.recordRequest(method, http.StatusBadRequest, start, 0, 0)
-		log.Printf("[%s] %s %s - 400 Bad Request (invalid path)", method, r.URL.Path, r.RemoteAddr)
+		slog.Warn("Invalid path", "method", method, "path", r.URL.Path, "remote", r.RemoteAddr)
 		writeS3Error(w, http.StatusBadRequest, "InvalidRequest", "Invalid path format")
 		return
 	}
@@ -69,7 +70,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// --- Verify bucket name ---
 	if bucket != s.VirtualBucket {
 		s.recordRequest(method, http.StatusNotFound, start, 0, 0)
-		log.Printf("[%s] %s %s - 404 Not Found (unknown bucket: %s)", method, r.URL.Path, r.RemoteAddr, bucket)
+		slog.Warn("Unknown bucket", "method", method, "path", r.URL.Path, "remote", r.RemoteAddr, "bucket", bucket)
 		writeS3Error(w, http.StatusNotFound, "NoSuchBucket", fmt.Sprintf("Bucket %s not found", bucket))
 		return
 	}
@@ -100,10 +101,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			span.SetAttributes(attribute.Int("http.status_code", status))
 			elapsed := time.Since(start)
+			logAttrs := []any{"operation", "LIST", "path", r.URL.Path, "remote", r.RemoteAddr, "status", status, "duration", elapsed}
 			if err != nil {
-				log.Printf("[LIST] %s %s - %d (%v) [%v]", r.URL.Path, r.RemoteAddr, status, err, elapsed)
+				slog.Error("Request failed", append(logAttrs, "error", err)...)
 			} else {
-				log.Printf("[LIST] %s %s - %d [%v]", r.URL.Path, r.RemoteAddr, status, elapsed)
+				slog.Info("Request completed", logAttrs...)
 			}
 			return
 		}
@@ -146,8 +148,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// --- Standard object operations ---
 		switch method {
 		case http.MethodPut:
-			requestSize = r.ContentLength
-			status, err = s.handlePut(ctx, w, r, key)
+			if copySource := r.Header.Get("X-Amz-Copy-Source"); copySource != "" {
+				status, err = s.handleCopyObject(ctx, w, r, bucket, key, copySource)
+			} else {
+				requestSize = r.ContentLength
+				status, err = s.handlePut(ctx, w, r, key)
+			}
 		case http.MethodGet:
 			status, responseSize, err = s.handleGet(ctx, w, r, key)
 		case http.MethodHead:
@@ -156,7 +162,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status, err = s.handleDelete(ctx, w, r, key)
 		default:
 			s.recordRequest(method, http.StatusMethodNotAllowed, start, 0, 0)
-			log.Printf("[%s] %s %s - 405 Method Not Allowed", method, r.URL.Path, r.RemoteAddr)
+			slog.Warn("Method not allowed", "method", method, "path", r.URL.Path, "remote", r.RemoteAddr)
 			writeS3Error(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not supported")
 			span.SetStatus(codes.Error, "method not allowed")
 			return
@@ -175,10 +181,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// --- Log request ---
 	elapsed := time.Since(start)
+	logAttrs := []any{"method", method, "path", r.URL.Path, "remote", r.RemoteAddr, "status", status, "duration", elapsed}
 	if err != nil {
-		log.Printf("[%s] %s %s - %d (%v) [%v]", method, r.URL.Path, r.RemoteAddr, status, err, elapsed)
+		slog.Error("Request failed", append(logAttrs, "error", err)...)
 	} else {
-		log.Printf("[%s] %s %s - %d [%v]", method, r.URL.Path, r.RemoteAddr, status, elapsed)
+		slog.Info("Request completed", logAttrs...)
 	}
 }
 
