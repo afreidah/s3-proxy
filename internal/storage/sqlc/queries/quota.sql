@@ -6,9 +6,15 @@ ON CONFLICT (backend_name) DO UPDATE SET
     updated_at = NOW();
 
 -- name: GetBackendAvailableSpace :one
-SELECT (bytes_limit - bytes_used)::bigint AS available
-FROM backend_quotas
-WHERE backend_name = $1;
+SELECT (q.bytes_limit - q.bytes_used - COALESCE(m.inflight, 0))::bigint AS available
+FROM backend_quotas q
+LEFT JOIN (
+    SELECT mu.backend_name, SUM(mp.size_bytes) AS inflight
+    FROM multipart_uploads mu
+    JOIN multipart_parts mp ON mp.upload_id = mu.upload_id
+    GROUP BY mu.backend_name
+) m ON m.backend_name = q.backend_name
+WHERE q.backend_name = $1;
 
 -- name: GetAllQuotaStats :many
 SELECT backend_name, bytes_used, bytes_limit, updated_at

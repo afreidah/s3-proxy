@@ -87,7 +87,9 @@ func (m *BackendManager) UploadPart(ctx context.Context, uploadID string, partNu
 
 	// Store part under a temp key
 	partKey := fmt.Sprintf("__multipart/%s/%d", uploadID, partNumber)
-	etag, err := backend.PutObject(ctx, partKey, body, size, "application/octet-stream")
+	bctx, bcancel := m.withTimeout(ctx)
+	defer bcancel()
+	etag, err := backend.PutObject(bctx, partKey, body, size, "application/octet-stream")
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("failed to upload part: %w", err)
@@ -160,13 +162,16 @@ func (m *BackendManager) CompleteMultipartUpload(ctx context.Context, uploadID s
 		defer func() { _ = pw.Close() }()
 		for _, part := range parts {
 			partKey := fmt.Sprintf("__multipart/%s/%d", uploadID, part.PartNumber)
-			body, _, _, _, _, err := backend.GetObject(ctx, partKey, "")
+			bctx, bcancel := m.withTimeout(ctx)
+			body, _, _, _, _, err := backend.GetObject(bctx, partKey, "")
 			if err != nil {
+				bcancel()
 				pw.CloseWithError(fmt.Errorf("failed to read part %d: %w", part.PartNumber, err))
 				return
 			}
 			_, err = io.Copy(pw, body)
 			_ = body.Close()
+			bcancel()
 			if err != nil {
 				pw.CloseWithError(fmt.Errorf("failed to stream part %d: %w", part.PartNumber, err))
 				return
@@ -174,7 +179,9 @@ func (m *BackendManager) CompleteMultipartUpload(ctx context.Context, uploadID s
 		}
 	}()
 
-	etag, err := backend.PutObject(ctx, mu.ObjectKey, pr, totalSize, mu.ContentType)
+	pctx, pcancel := m.withTimeout(ctx)
+	defer pcancel()
+	etag, err := backend.PutObject(pctx, mu.ObjectKey, pr, totalSize, mu.ContentType)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("failed to upload final object: %w", err)
@@ -196,7 +203,10 @@ func (m *BackendManager) CompleteMultipartUpload(ctx context.Context, uploadID s
 	// Clean up part objects from backend
 	for _, part := range parts {
 		partKey := fmt.Sprintf("__multipart/%s/%d", uploadID, part.PartNumber)
-		if delErr := backend.DeleteObject(ctx, partKey); delErr != nil {
+		dctx, dcancel := m.withTimeout(ctx)
+		delErr := backend.DeleteObject(dctx, partKey)
+		dcancel()
+		if delErr != nil {
 			slog.Warn("Failed to delete part key", "key", partKey, "error", delErr)
 		}
 	}
@@ -249,7 +259,10 @@ func (m *BackendManager) AbortMultipartUpload(ctx context.Context, uploadID stri
 	// Delete part objects from backend
 	for _, part := range parts {
 		partKey := fmt.Sprintf("__multipart/%s/%d", uploadID, part.PartNumber)
-		if delErr := backend.DeleteObject(ctx, partKey); delErr != nil {
+		dctx, dcancel := m.withTimeout(ctx)
+		delErr := backend.DeleteObject(dctx, partKey)
+		dcancel()
+		if delErr != nil {
 			slog.Warn("Failed to delete part key", "key", partKey, "error", delErr)
 		}
 	}

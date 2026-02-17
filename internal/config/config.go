@@ -52,9 +52,10 @@ type DatabaseConfig struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	ListenAddr    string `yaml:"listen_addr"`
-	VirtualBucket string `yaml:"virtual_bucket"`
-	MaxObjectSize int64  `yaml:"max_object_size"` // Max upload size in bytes (default: 5GB)
+	ListenAddr     string        `yaml:"listen_addr"`
+	VirtualBucket  string        `yaml:"virtual_bucket"`
+	MaxObjectSize  int64         `yaml:"max_object_size"`  // Max upload size in bytes (default: 5GB)
+	BackendTimeout time.Duration `yaml:"backend_timeout"`  // Per-operation timeout for backend S3 calls (default: 30s)
 }
 
 // AuthConfig holds authentication settings. Supports both AWS SigV4 (for S3
@@ -180,6 +181,10 @@ func (c *Config) SetDefaultsAndValidate() error {
 
 	if c.Server.MaxObjectSize == 0 {
 		c.Server.MaxObjectSize = 5 * 1024 * 1024 * 1024 // 5 GB
+	}
+
+	if c.Server.BackendTimeout == 0 {
+		c.Server.BackendTimeout = 30 * time.Second
 	}
 
 	// --- Database validation ---

@@ -60,7 +60,9 @@ func (m *BackendManager) PutObject(ctx context.Context, key string, body io.Read
 	}
 
 	// --- Upload to backend ---
-	etag, err := backend.PutObject(ctx, key, body, size, contentType)
+	bctx, bcancel := m.withTimeout(ctx)
+	defer bcancel()
+	etag, err := backend.PutObject(bctx, key, body, size, contentType)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
@@ -121,7 +123,9 @@ func (m *BackendManager) withReadFailover(ctx context.Context, operation, key st
 			continue
 		}
 
-		size, err := tryBackend(ctx, backend)
+		bctx, bcancel := m.withTimeout(ctx)
+		size, err := tryBackend(bctx, backend)
+		bcancel()
 		if err != nil {
 			lastErr = err
 			if i < len(locations)-1 {
@@ -155,7 +159,9 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 	// --- Check location cache first ---
 	if cachedBackend, ok := m.cacheGet(key); ok {
 		if backend, exists := m.backends[cachedBackend]; exists {
-			size, err := tryBackend(ctx, backend)
+			bctx, bcancel := m.withTimeout(ctx)
+			size, err := tryBackend(bctx, backend)
+			bcancel()
 			if err == nil {
 				m.recordOperation(operation, cachedBackend, start, nil)
 				span.SetAttributes(attribute.Bool("s3proxy.cache_hit", true))
@@ -175,7 +181,9 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 		if !ok {
 			continue
 		}
-		size, err := tryBackend(ctx, backend)
+		bctx, bcancel := m.withTimeout(ctx)
+		size, err := tryBackend(bctx, backend)
+		bcancel()
 		if err != nil {
 			lastErr = err
 			continue
@@ -289,7 +297,9 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 		if !ok {
 			continue
 		}
-		s, ct, _, err := backend.HeadObject(ctx, sourceKey)
+		bctx, bcancel := m.withTimeout(ctx)
+		s, ct, _, err := backend.HeadObject(bctx, sourceKey)
+		bcancel()
 		if err != nil {
 			continue
 		}
@@ -339,12 +349,15 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 			if !ok {
 				continue
 			}
-			body, _, _, _, _, err := srcBackend.GetObject(ctx, sourceKey, "")
+			bctx, bcancel := m.withTimeout(ctx)
+			body, _, _, _, _, err := srcBackend.GetObject(bctx, sourceKey, "")
 			if err != nil {
+				bcancel()
 				continue
 			}
 			_, copyErr := io.Copy(pw, body)
 			_ = body.Close()
+			bcancel()
 			if copyErr != nil {
 				pw.CloseWithError(fmt.Errorf("failed to stream source: %w", copyErr))
 			}
@@ -353,7 +366,9 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 		pw.CloseWithError(fmt.Errorf("failed to read source from any copy"))
 	}()
 
-	etag, err := destBackend.PutObject(ctx, destKey, pr, size, contentType)
+	dctx, dcancel := m.withTimeout(ctx)
+	defer dcancel()
+	etag, err := destBackend.PutObject(dctx, destKey, pr, size, contentType)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
@@ -416,7 +431,10 @@ func (m *BackendManager) DeleteObject(ctx context.Context, key string) error {
 				"backend", copy.BackendName, "key", key)
 			continue
 		}
-		if err := backend.DeleteObject(ctx, key); err != nil {
+		bctx, bcancel := m.withTimeout(ctx)
+		err := backend.DeleteObject(bctx, key)
+		bcancel()
+		if err != nil {
 			// Log error but don't fail - quota is already updated
 			slog.Warn("Failed to delete object from backend",
 				"backend", copy.BackendName, "key", key, "error", err)
@@ -447,7 +465,10 @@ type ListObjectsV2Result struct {
 }
 
 // ListObjects returns objects matching the given prefix with optional delimiter
-// support for virtual directory grouping.
+// support for virtual directory grouping. When a delimiter is set, many raw
+// objects may collapse into a single CommonPrefix, so we loop-fetch from the
+// store until maxKeys post-grouping items are collected or the store is
+// exhausted.
 func (m *BackendManager) ListObjects(ctx context.Context, prefix, delimiter, startAfter string, maxKeys int) (*ListObjectsV2Result, error) {
 	const operation = "ListObjects"
 	start := time.Now()
@@ -459,47 +480,58 @@ func (m *BackendManager) ListObjects(ctx context.Context, prefix, delimiter, sta
 	)
 	defer span.End()
 
-	storeResult, err := m.store.ListObjects(ctx, prefix, startAfter, maxKeys)
-	if err != nil {
-		if errors.Is(err, ErrDBUnavailable) {
-			span.SetStatus(codes.Error, "database unavailable")
-			return nil, &S3Error{StatusCode: 503, Code: "ServiceUnavailable", Message: "listing unavailable during database outage"}
+	result := &ListObjectsV2Result{}
+	cursor := startAfter
+	seen := make(map[string]bool) // tracks emitted common prefixes across fetches
+
+	for result.KeyCount < maxKeys {
+		storeResult, err := m.store.ListObjects(ctx, prefix, cursor, maxKeys)
+		if err != nil {
+			if errors.Is(err, ErrDBUnavailable) {
+				span.SetStatus(codes.Error, "database unavailable")
+				return nil, &S3Error{StatusCode: 503, Code: "ServiceUnavailable", Message: "listing unavailable during database outage"}
+			}
+			span.SetStatus(codes.Error, err.Error())
+			span.RecordError(err)
+			return nil, fmt.Errorf("failed to list objects: %w", err)
 		}
-		span.SetStatus(codes.Error, err.Error())
-		span.RecordError(err)
-		return nil, fmt.Errorf("failed to list objects: %w", err)
-	}
 
-	result := &ListObjectsV2Result{
-		IsTruncated:           storeResult.IsTruncated,
-		NextContinuationToken: storeResult.NextContinuationToken,
-	}
-
-	// Apply delimiter grouping if requested
-	if delimiter != "" {
-		seen := make(map[string]bool)
-		prefixLen := len(prefix)
+		if len(storeResult.Objects) == 0 {
+			break
+		}
 
 		for _, obj := range storeResult.Objects {
-			rest := obj.ObjectKey[prefixLen:]
-			idx := strings.Index(rest, delimiter)
-			if idx >= 0 {
-				// Object is in a "subdirectory" - collapse to common prefix
-				cp := obj.ObjectKey[:prefixLen+idx+len(delimiter)]
-				if !seen[cp] {
-					seen[cp] = true
-					result.CommonPrefixes = append(result.CommonPrefixes, cp)
-				}
-			} else {
-				result.Objects = append(result.Objects, obj)
+			if result.KeyCount >= maxKeys {
+				result.IsTruncated = true
+				result.NextContinuationToken = obj.ObjectKey
+				goto done
 			}
+
+			if delimiter != "" {
+				rest := obj.ObjectKey[len(prefix):]
+				idx := strings.Index(rest, delimiter)
+				if idx >= 0 {
+					cp := obj.ObjectKey[:len(prefix)+idx+len(delimiter)]
+					if !seen[cp] {
+						seen[cp] = true
+						result.CommonPrefixes = append(result.CommonPrefixes, cp)
+						result.KeyCount++
+					}
+					continue
+				}
+			}
+
+			result.Objects = append(result.Objects, obj)
+			result.KeyCount++
 		}
-	} else {
-		result.Objects = storeResult.Objects
+
+		if !storeResult.IsTruncated {
+			break
+		}
+		cursor = storeResult.Objects[len(storeResult.Objects)-1].ObjectKey
 	}
 
-	result.KeyCount = len(result.Objects) + len(result.CommonPrefixes)
-
+done:
 	m.recordOperation(operation, "", start, nil)
 	span.SetStatus(codes.Ok, "")
 	span.SetAttributes(attribute.Int("s3.key_count", result.KeyCount))

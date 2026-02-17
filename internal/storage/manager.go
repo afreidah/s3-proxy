@@ -36,12 +36,13 @@ var (
 
 // BackendManager manages multiple storage backends with quota tracking.
 type BackendManager struct {
-	backends      map[string]ObjectBackend   // name -> backend
-	store         MetadataStore              // metadata persistence (Store or CircuitBreakerStore)
-	order         []string                   // backend selection order
-	locationCache map[string]locationCacheEntry // key -> cached backend (for degraded reads)
-	cacheMu       sync.RWMutex
-	cacheTTL      time.Duration
+	backends       map[string]ObjectBackend      // name -> backend
+	store          MetadataStore                 // metadata persistence (Store or CircuitBreakerStore)
+	order          []string                      // backend selection order
+	locationCache  map[string]locationCacheEntry // key -> cached backend (for degraded reads)
+	cacheMu        sync.RWMutex
+	cacheTTL       time.Duration
+	backendTimeout time.Duration // per-operation timeout for backend S3 calls
 }
 
 // locationCacheEntry holds a cached key-to-backend mapping with TTL.
@@ -51,13 +52,14 @@ type locationCacheEntry struct {
 }
 
 // NewBackendManager creates a new backend manager with the given backends and store.
-func NewBackendManager(backends map[string]ObjectBackend, store MetadataStore, order []string, cacheTTL time.Duration) *BackendManager {
+func NewBackendManager(backends map[string]ObjectBackend, store MetadataStore, order []string, cacheTTL, backendTimeout time.Duration) *BackendManager {
 	return &BackendManager{
-		backends:      backends,
-		store:         store,
-		order:         order,
-		locationCache: make(map[string]locationCacheEntry),
-		cacheTTL:      cacheTTL,
+		backends:       backends,
+		store:          store,
+		order:          order,
+		locationCache:  make(map[string]locationCacheEntry),
+		cacheTTL:       cacheTTL,
+		backendTimeout: backendTimeout,
 	}
 }
 
@@ -91,6 +93,15 @@ func (m *BackendManager) cacheSet(key, backend string) {
 // -------------------------------------------------------------------------
 // HELPERS
 // -------------------------------------------------------------------------
+
+// withTimeout returns a context with the configured backend timeout applied.
+// If no timeout is configured, the original context is returned unchanged.
+func (m *BackendManager) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if m.backendTimeout > 0 {
+		return context.WithTimeout(ctx, m.backendTimeout)
+	}
+	return ctx, func() {}
+}
 
 // GenerateUploadID creates a random hex string for multipart upload IDs.
 func GenerateUploadID() string {

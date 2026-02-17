@@ -24,8 +24,9 @@ type mockStore struct {
 	deleteObjectResp []DeletedCopy
 	deleteObjectErr  error
 
-	listObjectsResp *ListObjectsResult
-	listObjectsErr  error
+	listObjectsResp  *ListObjectsResult
+	listObjectsPages []ListObjectsResult // for paginated tests
+	listObjectsErr   error
 
 	// Multipart
 	createMultipartErr error
@@ -88,11 +89,18 @@ func (m *mockStore) DeleteObject(_ context.Context, key string) ([]DeletedCopy, 
 	return m.deleteObjectResp, nil
 }
 
-func (m *mockStore) ListObjects(_ context.Context, _, _ string, _ int) (*ListObjectsResult, error) {
+func (m *mockStore) ListObjects(_ context.Context, _, startAfter string, _ int) (*ListObjectsResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.listObjectsErr != nil {
 		return nil, m.listObjectsErr
+	}
+	// Support paginated tests: if pages are configured, pop the first page
+	// on each call (the startAfter cursor distinguishes successive calls).
+	if len(m.listObjectsPages) > 0 {
+		page := m.listObjectsPages[0]
+		m.listObjectsPages = m.listObjectsPages[1:]
+		return &page, nil
 	}
 	return m.listObjectsResp, nil
 }

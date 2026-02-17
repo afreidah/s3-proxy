@@ -17,7 +17,7 @@ func newTestManager(store *mockStore, backends map[string]*mockBackend) *Backend
 		obs[name] = b
 		order = append(order, name)
 	}
-	return NewBackendManager(obs, store, order, 5*time.Second)
+	return NewBackendManager(obs, store, order, 5*time.Second, 30*time.Second)
 }
 
 // -------------------------------------------------------------------------
@@ -419,6 +419,92 @@ func TestListObjects_WithDelimiter(t *testing.T) {
 	}
 }
 
+func TestListObjects_DelimiterPagination(t *testing.T) {
+	// Many objects collapse into one common prefix per page. The manager
+	// must loop-fetch from the store to fill the requested maxKeys.
+	store := &mockStore{
+		listObjectsPages: []ListObjectsResult{
+			{
+				Objects: []ObjectLocation{
+					{ObjectKey: "dir/a/1", BackendName: "b1"},
+					{ObjectKey: "dir/a/2", BackendName: "b1"},
+					{ObjectKey: "dir/a/3", BackendName: "b1"},
+				},
+				IsTruncated: true,
+			},
+			{
+				Objects: []ObjectLocation{
+					{ObjectKey: "dir/b/1", BackendName: "b1"},
+					{ObjectKey: "dir/b/2", BackendName: "b1"},
+				},
+				IsTruncated: true,
+			},
+			{
+				Objects: []ObjectLocation{
+					{ObjectKey: "dir/c/1", BackendName: "b1"},
+					{ObjectKey: "dir/top.txt", BackendName: "b1"},
+				},
+				IsTruncated: false,
+			},
+		},
+	}
+	mgr := newTestManager(store, map[string]*mockBackend{"b1": newMockBackend()})
+
+	// Request maxKeys=3 with delimiter "/". The first page produces 1 prefix
+	// ("dir/a/"), the second produces 1 ("dir/b/"), the third produces
+	// 1 prefix ("dir/c/") which fills 3.
+	result, err := mgr.ListObjects(context.Background(), "dir/", "/", "", 3)
+	if err != nil {
+		t.Fatalf("ListObjects: %v", err)
+	}
+	if result.KeyCount != 3 {
+		t.Errorf("KeyCount = %d, want 3 (full page)", result.KeyCount)
+	}
+	if len(result.CommonPrefixes) != 3 {
+		t.Errorf("CommonPrefixes = %v, want 3 entries", result.CommonPrefixes)
+	}
+	// There are still objects remaining, so IsTruncated should be true
+	if !result.IsTruncated {
+		t.Error("expected IsTruncated=true since dir/top.txt remains")
+	}
+}
+
+func TestListObjects_DelimiterDedup(t *testing.T) {
+	// Objects in the same virtual directory across pages should not produce
+	// duplicate common prefixes.
+	store := &mockStore{
+		listObjectsPages: []ListObjectsResult{
+			{
+				Objects: []ObjectLocation{
+					{ObjectKey: "p/a/1", BackendName: "b1"},
+					{ObjectKey: "p/a/2", BackendName: "b1"},
+				},
+				IsTruncated: true,
+			},
+			{
+				// Same prefix continues into the next page
+				Objects: []ObjectLocation{
+					{ObjectKey: "p/a/3", BackendName: "b1"},
+					{ObjectKey: "p/b/1", BackendName: "b1"},
+				},
+				IsTruncated: false,
+			},
+		},
+	}
+	mgr := newTestManager(store, map[string]*mockBackend{"b1": newMockBackend()})
+
+	result, err := mgr.ListObjects(context.Background(), "p/", "/", "", 1000)
+	if err != nil {
+		t.Fatalf("ListObjects: %v", err)
+	}
+	if len(result.CommonPrefixes) != 2 {
+		t.Errorf("CommonPrefixes = %v, want [p/a/ p/b/]", result.CommonPrefixes)
+	}
+	if result.KeyCount != 2 {
+		t.Errorf("KeyCount = %d, want 2", result.KeyCount)
+	}
+}
+
 func TestListObjects_DBUnavailable(t *testing.T) {
 	store := &mockStore{listObjectsErr: ErrDBUnavailable}
 	mgr := newTestManager(store, map[string]*mockBackend{"b1": newMockBackend()})
@@ -437,11 +523,51 @@ func TestListObjects_DBUnavailable(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
+// Backend Timeout
+// -------------------------------------------------------------------------
+
+func TestPutObject_BackendTimeout(t *testing.T) {
+	backend := &mockBackend{
+		objects: make(map[string]mockObject),
+		putErr:  nil,
+	}
+	// Override PutObject behavior with a slow backend via a wrapper
+	slowBackend := &slowMockBackend{mockBackend: backend, delay: 200 * time.Millisecond}
+
+	store := &mockStore{getBackendResp: "b1"}
+	obs := map[string]ObjectBackend{"b1": slowBackend}
+	mgr := NewBackendManager(obs, store, []string{"b1"}, 5*time.Second, 50*time.Millisecond)
+
+	_, err := mgr.PutObject(context.Background(), "timeout-key", bytes.NewReader([]byte("data")), 4, "text/plain")
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+// slowMockBackend wraps a mockBackend and adds a delay to PutObject.
+type slowMockBackend struct {
+	*mockBackend
+	delay time.Duration
+}
+
+func (s *slowMockBackend) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (string, error) {
+	select {
+	case <-time.After(s.delay):
+		return s.mockBackend.PutObject(ctx, key, body, size, contentType)
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// -------------------------------------------------------------------------
 // Location Cache
 // -------------------------------------------------------------------------
 
 func TestLocationCache_SetAndGet(t *testing.T) {
-	mgr := NewBackendManager(nil, nil, nil, 5*time.Second)
+	mgr := NewBackendManager(nil, nil, nil, 5*time.Second, 0)
 	mgr.cacheSet("key1", "backend-a")
 
 	got, ok := mgr.cacheGet("key1")
@@ -454,7 +580,7 @@ func TestLocationCache_SetAndGet(t *testing.T) {
 }
 
 func TestLocationCache_Expiry(t *testing.T) {
-	mgr := NewBackendManager(nil, nil, nil, 10*time.Millisecond)
+	mgr := NewBackendManager(nil, nil, nil, 10*time.Millisecond, 0)
 	mgr.cacheSet("key1", "backend-a")
 
 	time.Sleep(15 * time.Millisecond)
@@ -466,7 +592,7 @@ func TestLocationCache_Expiry(t *testing.T) {
 }
 
 func TestLocationCache_Overwrite(t *testing.T) {
-	mgr := NewBackendManager(nil, nil, nil, 5*time.Second)
+	mgr := NewBackendManager(nil, nil, nil, 5*time.Second, 0)
 	mgr.cacheSet("key1", "old-backend")
 	mgr.cacheSet("key1", "new-backend")
 
