@@ -467,3 +467,41 @@ func waitForRecovery(t *testing.T) {
 		}
 	}
 }
+
+// newTestS3Backend creates an S3Backend for a test MinIO instance, avoiding
+// duplicate endpoint/credential wiring across tests.
+func newTestS3Backend(t *testing.T, name string) *storage.S3Backend {
+	t.Helper()
+
+	cfgs := map[string]config.BackendConfig{
+		"minio-1": {
+			Name:            "minio-1",
+			Endpoint:        envOrDefault("MINIO1_ENDPOINT", "http://localhost:19000"),
+			Region:          "us-east-1",
+			Bucket:          "backend1",
+			AccessKeyID:     "minioadmin",
+			SecretAccessKey: "minioadmin",
+			ForcePathStyle:  true,
+		},
+		"minio-2": {
+			Name:            "minio-2",
+			Endpoint:        envOrDefault("MINIO2_ENDPOINT", "http://localhost:19002"),
+			Region:          "us-east-1",
+			Bucket:          "backend2",
+			AccessKeyID:     "minioadmin",
+			SecretAccessKey: "minioadmin",
+			ForcePathStyle:  true,
+		},
+	}
+
+	cfg, ok := cfgs[name]
+	if !ok {
+		t.Fatalf("unknown backend %q", name)
+	}
+
+	backend, err := storage.NewS3Backend(cfg)
+	if err != nil {
+		t.Fatalf("NewS3Backend(%s): %v", name, err)
+	}
+	return backend
+}

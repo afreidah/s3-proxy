@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"github.com/munchbox/s3-proxy/internal/config"
+	"github.com/munchbox/s3-proxy/internal/server"
 	"github.com/munchbox/s3-proxy/internal/storage"
 )
 
@@ -1934,6 +1936,499 @@ func assertHTTPStatus(t *testing.T, err error, wantStatus int) {
 	}
 	// If we can't extract the HTTP status, just note the error type
 	t.Logf("could not extract HTTP status from error (type %T): %v", err, err)
+}
+
+// -------------------------------------------------------------------------
+// STORE-LEVEL TESTS
+// -------------------------------------------------------------------------
+
+func TestStore(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("RecordObject_OverwriteUpdatesQuota", func(t *testing.T) {
+		resetState(t)
+
+		key := uniqueKey(t, "store-overwrite")
+
+		// Record on backend A with 100 bytes.
+		if err := testStore.RecordObject(ctx, key, "minio-1", 100); err != nil {
+			t.Fatalf("RecordObject A: %v", err)
+		}
+		if used := queryQuotaUsed(t, "minio-1"); used != 100 {
+			t.Fatalf("minio-1 after first record = %d, want 100", used)
+		}
+
+		// Overwrite to backend B with 200 bytes.
+		if err := testStore.RecordObject(ctx, key, "minio-2", 200); err != nil {
+			t.Fatalf("RecordObject B: %v", err)
+		}
+
+		// Old backend quota should be decremented.
+		if used := queryQuotaUsed(t, "minio-1"); used != 0 {
+			t.Errorf("minio-1 after overwrite = %d, want 0", used)
+		}
+
+		// New backend quota should reflect the new size.
+		if used := queryQuotaUsed(t, "minio-2"); used != 200 {
+			t.Errorf("minio-2 after overwrite = %d, want 200", used)
+		}
+
+		// Only 1 copy should exist.
+		if copies := queryObjectCopies(t, key); copies != 1 {
+			t.Errorf("copies = %d, want 1", copies)
+		}
+
+		if backend := queryObjectBackend(t, key); backend != "minio-2" {
+			t.Errorf("backend = %q, want %q", backend, "minio-2")
+		}
+	})
+
+	t.Run("DeleteObject_NotFound", func(t *testing.T) {
+		resetState(t)
+
+		_, err := testStore.DeleteObject(ctx, "nonexistent-key-"+fmt.Sprintf("%d", time.Now().UnixNano()))
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		var s3Err *storage.S3Error
+		if !errors.As(err, &s3Err) {
+			t.Fatalf("expected *S3Error, got %T: %v", err, err)
+		}
+		if s3Err.StatusCode != 404 {
+			t.Errorf("status = %d, want 404", s3Err.StatusCode)
+		}
+	})
+
+	t.Run("MoveObjectLocation_RaceSafe", func(t *testing.T) {
+		resetState(t)
+
+		key := uniqueKey(t, "store-move")
+
+		// Put on minio-1.
+		if err := testStore.RecordObject(ctx, key, "minio-1", 100); err != nil {
+			t.Fatalf("RecordObject: %v", err)
+		}
+
+		// Move from minio-1 → minio-2.
+		size, err := testStore.MoveObjectLocation(ctx, key, "minio-1", "minio-2")
+		if err != nil {
+			t.Fatalf("MoveObjectLocation: %v", err)
+		}
+		if size != 100 {
+			t.Errorf("moved size = %d, want 100", size)
+		}
+
+		// Quotas should be updated.
+		if used := queryQuotaUsed(t, "minio-1"); used != 0 {
+			t.Errorf("minio-1 after move = %d, want 0", used)
+		}
+		if used := queryQuotaUsed(t, "minio-2"); used != 100 {
+			t.Errorf("minio-2 after move = %d, want 100", used)
+		}
+
+		// Move again from minio-1 (source gone) → should return 0, nil.
+		size, err = testStore.MoveObjectLocation(ctx, key, "minio-1", "minio-2")
+		if err != nil {
+			t.Fatalf("second MoveObjectLocation: %v", err)
+		}
+		if size != 0 {
+			t.Errorf("second move size = %d, want 0 (source gone)", size)
+		}
+
+		// Quotas unchanged.
+		if used := queryQuotaUsed(t, "minio-1"); used != 0 {
+			t.Errorf("minio-1 after second move = %d, want 0", used)
+		}
+		if used := queryQuotaUsed(t, "minio-2"); used != 100 {
+			t.Errorf("minio-2 after second move = %d, want 100", used)
+		}
+	})
+
+	t.Run("ListObjects_PaginationAndEscaping", func(t *testing.T) {
+		resetState(t)
+
+		// Insert keys with LIKE wildcards to test escaping.
+		prefix := fmt.Sprintf("list-escape/%d/", time.Now().UnixNano())
+		wildcardKeys := []string{
+			prefix + "normal-key",
+			prefix + "has%percent",
+			prefix + "has_underscore",
+		}
+		for _, key := range wildcardKeys {
+			if err := testStore.RecordObject(ctx, key, "minio-1", 10); err != nil {
+				t.Fatalf("RecordObject(%q): %v", key, err)
+			}
+		}
+
+		// Query with exact prefix — all 3 should match.
+		result, err := testStore.ListObjects(ctx, prefix, "", 1000)
+		if err != nil {
+			t.Fatalf("ListObjects: %v", err)
+		}
+		if len(result.Objects) != 3 {
+			t.Errorf("got %d objects, want 3", len(result.Objects))
+		}
+
+		// A prefix containing _ should not match the other keys.
+		underscorePrefix := prefix + "has_"
+		result, err = testStore.ListObjects(ctx, underscorePrefix, "", 1000)
+		if err != nil {
+			t.Fatalf("ListObjects underscore: %v", err)
+		}
+		if len(result.Objects) != 1 {
+			t.Errorf("underscore prefix got %d objects, want 1", len(result.Objects))
+		}
+
+		// Test pagination with startAfter.
+		result, err = testStore.ListObjects(ctx, prefix, "", 2)
+		if err != nil {
+			t.Fatalf("ListObjects page1: %v", err)
+		}
+		if !result.IsTruncated {
+			t.Error("expected IsTruncated=true for page 1")
+		}
+		if len(result.Objects) != 2 {
+			t.Errorf("page 1 got %d objects, want 2", len(result.Objects))
+		}
+
+		// Page 2 using continuation token.
+		result2, err := testStore.ListObjects(ctx, prefix, result.NextContinuationToken, 2)
+		if err != nil {
+			t.Fatalf("ListObjects page2: %v", err)
+		}
+		if result2.IsTruncated {
+			t.Error("expected IsTruncated=false for page 2")
+		}
+		if len(result2.Objects) != 1 {
+			t.Errorf("page 2 got %d objects, want 1", len(result2.Objects))
+		}
+	})
+
+	t.Run("GetBackendWithSpace_RespectsOrder", func(t *testing.T) {
+		resetState(t)
+
+		// Both backends have plenty of space. First in order should be returned.
+		name, err := testStore.GetBackendWithSpace(ctx, 10, []string{"minio-1", "minio-2"})
+		if err != nil {
+			t.Fatalf("GetBackendWithSpace: %v", err)
+		}
+		if name != "minio-1" {
+			t.Errorf("got %q, want %q (first in order)", name, "minio-1")
+		}
+
+		// Reverse order — minio-2 should be returned first.
+		name, err = testStore.GetBackendWithSpace(ctx, 10, []string{"minio-2", "minio-1"})
+		if err != nil {
+			t.Fatalf("GetBackendWithSpace reversed: %v", err)
+		}
+		if name != "minio-2" {
+			t.Errorf("got %q, want %q (first in reversed order)", name, "minio-2")
+		}
+
+		// Fill minio-1 completely, then first-in-order should skip to minio-2.
+		if err := testStore.RecordObject(ctx, uniqueKey(t, "fill"), "minio-1", 1024); err != nil {
+			t.Fatalf("RecordObject fill: %v", err)
+		}
+		name, err = testStore.GetBackendWithSpace(ctx, 1, []string{"minio-1", "minio-2"})
+		if err != nil {
+			t.Fatalf("GetBackendWithSpace after fill: %v", err)
+		}
+		if name != "minio-2" {
+			t.Errorf("got %q, want %q (minio-1 full)", name, "minio-2")
+		}
+	})
+
+	t.Run("RecordReplica_StaleSourceSkipped", func(t *testing.T) {
+		resetState(t)
+
+		key := uniqueKey(t, "store-replica")
+
+		// Record on minio-1.
+		if err := testStore.RecordObject(ctx, key, "minio-1", 100); err != nil {
+			t.Fatalf("RecordObject: %v", err)
+		}
+
+		// Replica to minio-2 should succeed.
+		ok, err := testStore.RecordReplica(ctx, key, "minio-2", "minio-1", 100)
+		if err != nil {
+			t.Fatalf("RecordReplica: %v", err)
+		}
+		if !ok {
+			t.Error("first RecordReplica = false, want true")
+		}
+		if used := queryQuotaUsed(t, "minio-2"); used != 100 {
+			t.Errorf("minio-2 after replica = %d, want 100", used)
+		}
+
+		// Delete source (and all copies).
+		if _, err := testStore.DeleteObject(ctx, key); err != nil {
+			t.Fatalf("DeleteObject: %v", err)
+		}
+
+		// Record the key fresh on minio-2 (different lifecycle).
+		if err := testStore.RecordObject(ctx, key, "minio-2", 50); err != nil {
+			t.Fatalf("RecordObject fresh: %v", err)
+		}
+
+		// Try to replicate to minio-1 citing minio-1 as source (stale).
+		// Source doesn't exist on minio-1, so should return false.
+		ok, err = testStore.RecordReplica(ctx, key, "minio-1", "minio-1", 50)
+		if err != nil {
+			t.Fatalf("RecordReplica stale: %v", err)
+		}
+		if ok {
+			t.Error("stale RecordReplica = true, want false (source doesn't exist)")
+		}
+	})
+}
+
+// -------------------------------------------------------------------------
+// SYNC PIPELINE
+// -------------------------------------------------------------------------
+
+func TestSyncPipeline(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ImportAndVerify", func(t *testing.T) {
+		resetState(t)
+
+		// Put 5 objects directly to MinIO (simulating pre-existing bucket content).
+		directClient := newDirectMinioClient(t, "minio-1")
+		prefix := fmt.Sprintf("sync-test/%d/", time.Now().UnixNano())
+		keys := make([]string, 5)
+		for i := range keys {
+			keys[i] = fmt.Sprintf("%sobj-%d", prefix, i)
+			_, err := directClient.PutObject(ctx, &s3.PutObjectInput{
+				Bucket:        aws.String("backend1"),
+				Key:           aws.String(keys[i]),
+				Body:          bytes.NewReader(bytes.Repeat([]byte("S"), 80)),
+				ContentLength: aws.Int64(80),
+			})
+			if err != nil {
+				t.Fatalf("direct PutObject(%s): %v", keys[i], err)
+			}
+		}
+
+		// Create an S3Backend and run the same pipeline as runSync:
+		// backend.ListObjects → store.ImportObject
+		backend := newTestS3Backend(t, "minio-1")
+		var imported, skipped int
+
+		err := backend.ListObjects(ctx, prefix, func(objects []storage.ListedObject) error {
+			for _, obj := range objects {
+				ok, err := testStore.ImportObject(ctx, obj.Key, "minio-1", obj.SizeBytes)
+				if err != nil {
+					return fmt.Errorf("ImportObject(%s): %w", obj.Key, err)
+				}
+				if ok {
+					imported++
+				} else {
+					skipped++
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("ListObjects+ImportObject pipeline: %v", err)
+		}
+
+		if imported != 5 {
+			t.Errorf("imported = %d, want 5", imported)
+		}
+		if skipped != 0 {
+			t.Errorf("skipped = %d, want 0", skipped)
+		}
+
+		// Verify quota updated correctly: 5 * 80 = 400
+		if used := queryQuotaUsed(t, "minio-1"); used != 400 {
+			t.Errorf("minio-1 bytes_used = %d, want 400", used)
+		}
+
+		// Verify all objects accessible via proxy
+		proxyClient := newS3Client(t)
+		for _, key := range keys {
+			resp, err := proxyClient.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(virtualBucket),
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				t.Fatalf("GetObject(%s) after sync: %v", key, err)
+			}
+			got, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if len(got) != 80 {
+				t.Errorf("GetObject(%s) body = %d bytes, want 80", key, len(got))
+			}
+		}
+	})
+
+	t.Run("IdempotentRerun", func(t *testing.T) {
+		resetState(t)
+
+		// Put 3 objects directly to MinIO.
+		directClient := newDirectMinioClient(t, "minio-1")
+		prefix := fmt.Sprintf("sync-idem/%d/", time.Now().UnixNano())
+		for i := 0; i < 3; i++ {
+			key := fmt.Sprintf("%sobj-%d", prefix, i)
+			_, err := directClient.PutObject(ctx, &s3.PutObjectInput{
+				Bucket:        aws.String("backend1"),
+				Key:           aws.String(key),
+				Body:          bytes.NewReader(bytes.Repeat([]byte("I"), 60)),
+				ContentLength: aws.Int64(60),
+			})
+			if err != nil {
+				t.Fatalf("direct PutObject(%s): %v", key, err)
+			}
+		}
+
+		backend := newTestS3Backend(t, "minio-1")
+
+		// Run sync pipeline twice.
+		syncOnce := func() (imported, skipped int) {
+			err := backend.ListObjects(ctx, prefix, func(objects []storage.ListedObject) error {
+				for _, obj := range objects {
+					ok, err := testStore.ImportObject(ctx, obj.Key, "minio-1", obj.SizeBytes)
+					if err != nil {
+						return err
+					}
+					if ok {
+						imported++
+					} else {
+						skipped++
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("sync pipeline: %v", err)
+			}
+			return
+		}
+
+		imp1, skip1 := syncOnce()
+		if imp1 != 3 || skip1 != 0 {
+			t.Errorf("run 1: imported=%d skipped=%d, want 3/0", imp1, skip1)
+		}
+
+		// Second run: all should be skipped.
+		imp2, skip2 := syncOnce()
+		if imp2 != 0 || skip2 != 3 {
+			t.Errorf("run 2: imported=%d skipped=%d, want 0/3", imp2, skip2)
+		}
+
+		// Quota should not be double-counted.
+		if used := queryQuotaUsed(t, "minio-1"); used != 180 {
+			t.Errorf("minio-1 bytes_used = %d, want 180 (not double-counted)", used)
+		}
+	})
+}
+
+// -------------------------------------------------------------------------
+// AUTH (SigV4)
+// -------------------------------------------------------------------------
+
+func TestAuthSigV4(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		authKey    = "TESTKEY0123456789"
+		authSecret = "TESTSECRET0123456789abcdefghijklm"
+	)
+
+	// Start an ephemeral server with SigV4 auth enabled, sharing the same manager.
+	authSrv := &server.Server{
+		Manager:       testManager,
+		VirtualBucket: virtualBucket,
+		AuthConfig: config.AuthConfig{
+			AccessKeyID:     authKey,
+			SecretAccessKey: authSecret,
+		},
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	authAddr := listener.Addr().String()
+
+	httpServer := &http.Server{
+		Handler:      authSrv,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+	go httpServer.Serve(listener)
+	defer httpServer.Shutdown(ctx)
+
+	// Helper: create an S3 client for the auth server with given credentials.
+	authClient := func(key, secret string) *s3.Client {
+		return s3.New(s3.Options{
+			BaseEndpoint: aws.String("http://" + authAddr),
+			Region:       "us-east-1",
+			Credentials:  credentials.NewStaticCredentialsProvider(key, secret, ""),
+			UsePathStyle: true,
+		})
+	}
+
+	t.Run("ValidCredentials", func(t *testing.T) {
+		client := authClient(authKey, authSecret)
+		key := uniqueKey(t, "auth")
+		body := []byte("authenticated-content")
+
+		// PUT should succeed
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(virtualBucket),
+			Key:           aws.String(key),
+			Body:          bytes.NewReader(body),
+			ContentLength: aws.Int64(int64(len(body))),
+		})
+		if err != nil {
+			t.Fatalf("PutObject with valid creds: %v", err)
+		}
+
+		// GET should succeed
+		resp, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("GetObject with valid creds: %v", err)
+		}
+		defer resp.Body.Close()
+
+		got, _ := io.ReadAll(resp.Body)
+		if !bytes.Equal(got, body) {
+			t.Errorf("body mismatch: got %d bytes, want %d", len(got), len(body))
+		}
+	})
+
+	t.Run("WrongCredentials403", func(t *testing.T) {
+		client := authClient("WRONGKEY", "WRONGSECRET")
+		_, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String("any-key"),
+		})
+		if err == nil {
+			t.Fatal("expected error with wrong credentials, got nil")
+		}
+		assertHTTPStatus(t, err, 403)
+	})
+
+	t.Run("UnsignedRequest403", func(t *testing.T) {
+		// Raw HTTP request with no Authorization header at all.
+		url := fmt.Sprintf("http://%s/%s/any-key", authAddr, virtualBucket)
+		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("raw GET: %v", err)
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+
+		if resp.StatusCode != 403 {
+			t.Errorf("status = %d, want 403", resp.StatusCode)
+		}
+	})
 }
 
 // -------------------------------------------------------------------------
