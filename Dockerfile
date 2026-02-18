@@ -1,7 +1,7 @@
 # -------------------------------------------------------------------------------
 # S3 Proxy - Unified S3 Endpoint
 #
-# Project: Munchbox / Author: Alex Freidah
+# Author: Alex Freidah
 #
 # Go-based S3 proxy service with Prometheus metrics and OpenTelemetry tracing.
 # Provides a unified endpoint for S3-compatible storage backends.

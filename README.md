@@ -1,6 +1,8 @@
 # S3 Proxy
 
-Unified S3-compatible endpoint that routes objects to one or more storage backends with per-backend quota management. Metadata and quota tracking live in PostgreSQL; the backends only see standard S3 API calls.
+An S3-compatible proxy that combines multiple storage backends into a single unified endpoint. Add as many S3-compatible backends as you want — OCI Object Storage, Backblaze B2, AWS S3, MinIO, whatever — and the proxy presents them to clients as one seamless bucket. Per-backend quota enforcement lets you cap each backend at exactly the byte limit you choose, so you can stack multiple free-tier allocations from different providers into a single, larger storage target for backups, media, or anything else without worrying about surprise bills.
+
+Objects are automatically routed to the first backend with available quota. Metadata and quota tracking live in PostgreSQL; the backends only see standard S3 API calls.
 
 ## Architecture
 
@@ -128,7 +130,7 @@ telemetry:
     path: "/metrics"
   tracing:
     enabled: true
-    endpoint: "tempo.service.consul:4317"
+    endpoint: "localhost:4317"
     insecure: true
     sample_rate: 1.0
 
@@ -287,62 +289,54 @@ make push
 
 ## Deployment
 
-Deployed as a Nomad pack job via the `munchbox-service` pack:
+Build and push a Docker image:
 
 ```bash
-source munchbox-env.sh && cd nomad && make run JOB=s3-proxy
+make push
 ```
 
 ### Prerequisites
 
-- PostgreSQL database `s3proxy` on the shared Patroni cluster
-- Vault secret at `secret/s3-proxy` with all config values
-- Docker image pushed to `registry.munchbox.cc/s3-proxy:latest`
-- OCI Object Storage bucket provisioned via Terragrunt (`infrastructure/terragrunt/oci/object-storage/`)
-
-### Monitoring
-
-- Prometheus scrapes via Consul service discovery
-- Grafana dashboard: "S3 Proxy" (uid: `munchbox-s3-proxy`)
-- Alert rules in `s3-proxy-health` group: service down, error rate, backend failures, quota warnings, latency
+- PostgreSQL database (schema auto-applied on startup)
+- At least one S3-compatible storage backend
+- Configuration file with credentials (see `config.example.yaml`)
 
 ## Project Structure
 
 ```
-src/s3-proxy/
-  cmd/s3-proxy/
-    main.go                  Entry point, subcommand dispatch, background tasks
-    sync.go                  Sync subcommand (bucket import)
-  internal/
-    auth/auth.go             SigV4 verification, legacy token auth
-    config/config.go         YAML config loader with env var expansion
-    server/
-      server.go              HTTP router, auth middleware, metrics recording
-      objects.go             PUT, GET, HEAD, DELETE, COPY handlers
-      list.go                ListObjectsV2 handler (XML response)
-      multipart.go           Multipart upload handlers
-      helpers.go             Path parsing, S3 XML error responses
-      ratelimit.go           Per-IP token bucket rate limiter
-    storage/
-      backend.go             S3 client (AWS SDK v2)
-      metadata.go            MetadataStore interface, sentinel errors
-      store.go               PostgreSQL storage layer (pgx/v5 + sqlc)
-      circuitbreaker.go      Three-state circuit breaker wrapper
-      manager.go             Multi-backend routing, quota selection, cache
-      manager_objects.go     Object CRUD with read failover + broadcast
-      manager_multipart.go   Multipart upload lifecycle
-      manager_metrics.go     Quota metric recording
-      rebalancer.go          Object rebalancing across backends
-      replicator.go          Cross-backend object replication
-      sqlc/
-        schema.sql           Schema for sqlc code generation
-        queries/             Annotated SQL query files
-        *.go                 Generated type-safe query code (do not edit)
-    telemetry/
-      metrics.go             Prometheus metric definitions
-      tracing.go             OpenTelemetry tracer setup
-  sqlc.yaml                  sqlc configuration
-  Dockerfile                 Multi-stage build
-  Makefile                   Build, test, lint, generate, push targets
-  config.example.yaml        Configuration reference
+cmd/s3-proxy/
+  main.go                    Entry point, subcommand dispatch, background tasks
+  sync.go                    Sync subcommand (bucket import)
+internal/
+  auth/auth.go               SigV4 verification, legacy token auth
+  config/config.go           YAML config loader with env var expansion
+  server/
+    server.go                HTTP router, auth middleware, metrics recording
+    objects.go               PUT, GET, HEAD, DELETE, COPY handlers
+    list.go                  ListObjectsV2 handler (XML response)
+    multipart.go             Multipart upload handlers
+    helpers.go               Path parsing, S3 XML error responses
+    ratelimit.go             Per-IP token bucket rate limiter
+  storage/
+    backend.go               S3 client (AWS SDK v2)
+    metadata.go              MetadataStore interface, sentinel errors
+    store.go                 PostgreSQL storage layer (pgx/v5 + sqlc)
+    circuitbreaker.go        Three-state circuit breaker wrapper
+    manager.go               Multi-backend routing, quota selection, cache
+    manager_objects.go       Object CRUD with read failover + broadcast
+    manager_multipart.go     Multipart upload lifecycle
+    manager_metrics.go       Quota metric recording
+    rebalancer.go            Object rebalancing across backends
+    replicator.go            Cross-backend object replication
+    sqlc/
+      schema.sql             Schema for sqlc code generation
+      queries/               Annotated SQL query files
+      *.go                   Generated type-safe query code (do not edit)
+  telemetry/
+    metrics.go               Prometheus metric definitions
+    tracing.go               OpenTelemetry tracer setup
+sqlc.yaml                    sqlc configuration
+Dockerfile                   Multi-stage build
+Makefile                     Build, test, lint, generate, push targets
+config.example.yaml          Configuration reference
 ```

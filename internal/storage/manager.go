@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Manager - Multi-Backend Object Storage Manager
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Core type and constructor for the backend manager. Object CRUD operations are
 // in manager_objects.go, multipart operations in manager_multipart.go, quota

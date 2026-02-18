@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Store - PostgreSQL Quota and Object Location Storage
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Manages quota tracking and object location storage in PostgreSQL. Tracks which
 // backend stores each object and how much quota each backend has used. Provides

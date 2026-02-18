@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Helpers - Path Parsing and Error Formatting
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Utility functions for the server package. Handles URL path parsing for S3-style
 // bucket/key extraction and S3-compatible XML error response formatting.

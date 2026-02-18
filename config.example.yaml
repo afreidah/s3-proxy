@@ -58,7 +58,7 @@ telemetry:
     path: "/metrics"
   tracing:
     enabled: false
-    endpoint: "tempo.service.consul:4317"
+    endpoint: "localhost:4317"
     insecure: true
     sample_rate: 1.0
 

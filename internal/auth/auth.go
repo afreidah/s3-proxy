@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Authentication - AWS Signature Version 4 Verification
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Implements AWS SigV4 signature verification for S3 client compatibility. Parses
 // the Authorization header, reconstructs the canonical request, and verifies the

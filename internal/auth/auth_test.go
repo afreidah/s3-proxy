@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Authentication Tests - SigV4 and Token Verification
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Unit tests for AWS SigV4 field parsing, canonical query construction, signing
 // key derivation, and the authentication dispatch logic for both SigV4 and legacy

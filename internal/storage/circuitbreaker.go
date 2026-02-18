@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // CircuitBreakerStore - Self-Healing Database Degradation Wrapper
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Wraps a MetadataStore with a three-state circuit breaker that detects database
 // outages and returns ErrDBUnavailable when the circuit is open. The manager

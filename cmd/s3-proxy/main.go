@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // S3 Proxy - Unified S3 Endpoint with Quota Management
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Entry point for the S3 proxy service. Dispatches to subcommands: "serve"
 // (default) starts the HTTP server, "sync" imports pre-existing bucket objects

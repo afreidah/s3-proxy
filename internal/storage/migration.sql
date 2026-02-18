@@ -1,7 +1,7 @@
 -- -------------------------------------------------------------------------------
 -- S3 Proxy Database Schema
 --
--- Project: Munchbox / Author: Alex Freidah
+-- Author: Alex Freidah
 --
 -- PostgreSQL schema for quota tracking, object location storage, and multipart
 -- uploads. Applied automatically on startup via go:embed.

@@ -1,10 +1,10 @@
 # -------------------------------------------------------------------------------
 # S3 Proxy - Multi-Architecture Build and Push
 #
-# Project: Munchbox / Author: Alex Freidah
+# Author: Alex Freidah
 #
 # Go S3 proxy service for unified S3-compatible storage access. Builds multi-arch
-# container images for deployment on heterogeneous Nomad clients.
+# container images.
 # -------------------------------------------------------------------------------
 
 REGISTRY   ?= registry.munchbox.cc
@@ -32,8 +32,8 @@ help: ## Display available Make targets
 # -------------------------------------------------------------------------
 
 builder: ## Ensure the Buildx builder exists
-	@docker buildx inspect munchbox-builder >/dev/null 2>&1 || \
-		docker buildx create --name munchbox-builder --driver-opt network=host --use
+	@docker buildx inspect s3-proxy-builder >/dev/null 2>&1 || \
+		docker buildx create --name s3-proxy-builder --driver-opt network=host --use
 	@docker buildx inspect --bootstrap
 
 # -------------------------------------------------------------------------

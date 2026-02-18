@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // HTTP Server - S3 Request Routing
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // HTTP server and request router for S3-compatible operations. Implements a
 // subset of the S3 API sufficient for basic object storage: PUT, GET, HEAD,

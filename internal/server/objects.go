@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Object Handlers - PUT, GET, HEAD, DELETE, CopyObject
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // HTTP handlers for standard S3 object operations. Streams response bodies
 // directly to avoid buffering large objects in memory.

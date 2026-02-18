@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Manager Tests - Upload ID Generation and String Utilities
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Unit tests for the backend manager's utility functions including upload ID
 // generation uniqueness and length validation.
