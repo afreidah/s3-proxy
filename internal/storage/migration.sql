@@ -58,3 +58,14 @@ CREATE TABLE IF NOT EXISTS multipart_parts (
 -- Index for cleaning up stale multipart uploads
 CREATE INDEX IF NOT EXISTS idx_multipart_uploads_created
     ON multipart_uploads(created_at);
+
+-- Track per-backend API requests and data transfer by month
+CREATE TABLE IF NOT EXISTS backend_usage (
+    backend_name  TEXT NOT NULL REFERENCES backend_quotas(backend_name),
+    period        TEXT NOT NULL,
+    api_requests  BIGINT NOT NULL DEFAULT 0,
+    egress_bytes  BIGINT NOT NULL DEFAULT 0,
+    ingress_bytes BIGINT NOT NULL DEFAULT 0,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (backend_name, period)
+);

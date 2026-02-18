@@ -136,6 +136,9 @@ func runServe() {
 		for {
 			select {
 			case <-ticker.C:
+				if err := manager.FlushUsage(bgCtx); err != nil && !errors.Is(err, storage.ErrDBUnavailable) {
+					slog.Error("Failed to flush usage counters", "error", err)
+				}
 				if err := manager.UpdateQuotaMetrics(bgCtx); err != nil && !errors.Is(err, storage.ErrDBUnavailable) {
 					slog.Error("Failed to update quota metrics", "error", err)
 				}
@@ -304,6 +307,11 @@ func runServe() {
 
 		// Stop cache eviction goroutine
 		manager.Close()
+
+		// Flush usage counters before closing database
+		if err := manager.FlushUsage(shutdownCtx); err != nil {
+			slog.Warn("Failed to flush usage counters on shutdown", "error", err)
+		}
 
 		// Close database connection
 		store.Close()

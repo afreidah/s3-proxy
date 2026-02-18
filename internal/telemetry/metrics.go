@@ -163,6 +163,35 @@ var (
 		[]string{"backend"},
 	)
 
+	// --- Usage tracking metrics ---
+
+	// UsageApiRequests tracks the current month's API request count per backend.
+	UsageApiRequests = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_usage_api_requests",
+			Help: "Current month API request count per backend (from DB)",
+		},
+		[]string{"backend"},
+	)
+
+	// UsageEgressBytes tracks the current month's egress bytes per backend.
+	UsageEgressBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_usage_egress_bytes",
+			Help: "Current month egress bytes per backend (from DB)",
+		},
+		[]string{"backend"},
+	)
+
+	// UsageIngressBytes tracks the current month's ingress bytes per backend.
+	UsageIngressBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "s3proxy_usage_ingress_bytes",
+			Help: "Current month ingress bytes per backend (from DB)",
+		},
+		[]string{"backend"},
+	)
+
 	// --- Rebalancer metrics ---
 
 	// RebalanceObjectsMoved counts objects moved by the rebalancer.

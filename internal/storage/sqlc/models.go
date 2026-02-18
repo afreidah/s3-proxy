@@ -15,6 +15,15 @@ type BackendQuota struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type BackendUsage struct {
+	BackendName  string
+	Period       string
+	ApiRequests  int64
+	EgressBytes  int64
+	IngressBytes int64
+	UpdatedAt    pgtype.Timestamptz
+}
+
 type MultipartPart struct {
 	UploadID   string
 	PartNumber int32

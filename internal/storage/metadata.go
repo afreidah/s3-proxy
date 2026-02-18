@@ -70,6 +70,17 @@ type MetadataStore interface {
 	MoveObjectLocation(ctx context.Context, key, fromBackend, toBackend string) (int64, error)
 	GetUnderReplicatedObjects(ctx context.Context, factor, limit int) ([]ObjectLocation, error)
 	RecordReplica(ctx context.Context, key, targetBackend, sourceBackend string, size int64) (bool, error)
+
+	// --- Usage tracking operations ---
+	FlushUsageDeltas(ctx context.Context, backendName, period string, apiRequests, egressBytes, ingressBytes int64) error
+	GetUsageForPeriod(ctx context.Context, period string) (map[string]UsageStat, error)
+}
+
+// UsageStat holds usage statistics for a single backend in a given period.
+type UsageStat struct {
+	ApiRequests  int64
+	EgressBytes  int64
+	IngressBytes int64
 }
 
 // Compile-time check: *Store satisfies MetadataStore.
