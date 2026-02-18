@@ -290,6 +290,71 @@ func TestCircuitBreakerDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigValidation_MixedQuotaAndUnlimited(t *testing.T) {
+	cfg := Config{
+		Server:   ServerConfig{ListenAddr: ":9000", VirtualBucket: "b"},
+		Database: DatabaseConfig{Host: "h", Database: "d", User: "u"},
+		Backends: []BackendConfig{
+			{Name: "quota", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 1024},
+			{Name: "unlimited", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 0},
+		},
+		Replication: ReplicationConfig{Factor: 2},
+	}
+
+	err := cfg.SetDefaultsAndValidate()
+	if err == nil {
+		t.Error("mixing quota'd and unlimited backends should fail validation")
+	}
+}
+
+func TestConfigValidation_MultipleUnlimitedWithoutReplication(t *testing.T) {
+	cfg := Config{
+		Server:   ServerConfig{ListenAddr: ":9000", VirtualBucket: "b"},
+		Database: DatabaseConfig{Host: "h", Database: "d", User: "u"},
+		Backends: []BackendConfig{
+			{Name: "u1", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 0},
+			{Name: "u2", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 0},
+		},
+	}
+
+	err := cfg.SetDefaultsAndValidate()
+	if err == nil {
+		t.Error("multiple unlimited backends without replication should fail validation")
+	}
+}
+
+func TestConfigValidation_MultipleUnlimitedWithReplication(t *testing.T) {
+	cfg := Config{
+		Server:   ServerConfig{ListenAddr: ":9000", VirtualBucket: "b"},
+		Database: DatabaseConfig{Host: "h", Database: "d", User: "u"},
+		Backends: []BackendConfig{
+			{Name: "u1", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 0},
+			{Name: "u2", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 0},
+		},
+		Replication: ReplicationConfig{Factor: 2},
+	}
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Errorf("multiple unlimited backends with replication should pass: %v", err)
+	}
+}
+
+func TestConfigValidation_QuotaBackendsWithReplication(t *testing.T) {
+	cfg := Config{
+		Server:   ServerConfig{ListenAddr: ":9000", VirtualBucket: "b"},
+		Database: DatabaseConfig{Host: "h", Database: "d", User: "u"},
+		Backends: []BackendConfig{
+			{Name: "q1", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 1024},
+			{Name: "q2", Endpoint: "e", Bucket: "b", AccessKeyID: "a", SecretAccessKey: "s", QuotaBytes: 2048},
+		},
+		Replication: ReplicationConfig{Factor: 2},
+	}
+
+	if err := cfg.SetDefaultsAndValidate(); err != nil {
+		t.Errorf("quota'd backends with replication should pass: %v", err)
+	}
+}
+
 // validBaseConfig returns a Config with all required fields populated (1 backend).
 func validBaseConfig() Config {
 	return Config{

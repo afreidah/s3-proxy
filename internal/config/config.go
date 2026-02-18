@@ -248,6 +248,25 @@ func (c *Config) SetDefaultsAndValidate() error {
 		}
 	}
 
+	// --- Cross-field validation: quota and replication combinations ---
+	if len(c.Backends) > 1 {
+		unlimitedCount := 0
+		for _, b := range c.Backends {
+			if b.QuotaBytes == 0 {
+				unlimitedCount++
+			}
+		}
+		quotaCount := len(c.Backends) - unlimitedCount
+
+		if unlimitedCount > 0 && quotaCount > 0 {
+			errors = append(errors, "cannot mix unlimited (quota_bytes: 0) and quota-limited backends; either all backends must have quotas for overflow routing or all must be unlimited with replication")
+		}
+
+		if unlimitedCount > 1 && c.Replication.Factor <= 1 {
+			errors = append(errors, "multiple backends with unlimited quota (quota_bytes: 0) requires replication.factor >= 2; without quotas there is no overflow routing and only the first backend would receive writes")
+		}
+	}
+
 	// --- Telemetry defaults ---
 	if c.Telemetry.Metrics.Path == "" {
 		c.Telemetry.Metrics.Path = "/metrics"
