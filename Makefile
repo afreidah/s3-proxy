@@ -70,8 +70,7 @@ test: ## Run Go tests
 	go test -race -v ./...
 
 lint: ## Run Go linter
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed"; exit 1; }
-	golangci-lint run ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...
 
 run: ## Run locally (requires config.yaml)
 	go run ./cmd/s3-orchestrator -config config.yaml
