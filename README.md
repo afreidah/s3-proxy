@@ -2,6 +2,8 @@
 
 An S3-compatible proxy that combines multiple storage backends into a single unified endpoint. Add as many S3-compatible backends as you want — OCI Object Storage, Backblaze B2, AWS S3, MinIO, whatever — and the proxy presents them to clients as one seamless bucket. Per-backend quota enforcement lets you cap each backend at exactly the byte limit you choose, so you can stack multiple free-tier allocations from different providers into a single, larger storage target for backups, media, or anything else without worrying about surprise bills.
 
+Built-in cross-backend replication also makes this an easy way to keep your data in multiple clouds without touching your application. Point your app at the proxy, set a replication factor, and every object automatically lands in two or more providers — instant multi-cloud redundancy with zero client-side changes.
+
 Objects are automatically routed to the first backend with available quota. Metadata and quota tracking live in PostgreSQL; the backends only see standard S3 API calls.
 
 ## Architecture
