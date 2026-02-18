@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/munchbox/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-proxy/internal/telemetry"
 )
 
 // -------------------------------------------------------------------------

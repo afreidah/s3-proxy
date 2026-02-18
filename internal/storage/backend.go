@@ -20,8 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/munchbox/s3-proxy/internal/config"
-	"github.com/munchbox/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-proxy/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 )
 

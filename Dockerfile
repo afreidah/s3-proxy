@@ -26,7 +26,7 @@ COPY internal/ internal/
 
 # Build binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w -X github.com/munchbox/s3-proxy/internal/telemetry.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/afreidah/s3-proxy/internal/telemetry.Version=${VERSION}" \
     -o s3-proxy ./cmd/s3-proxy
 
 # -------------------------------------------------------------------------

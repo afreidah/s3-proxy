@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/munchbox/s3-proxy/internal/config"
+	"github.com/afreidah/s3-proxy/internal/config"
 )
 
 func TestRateLimiter_AllowAndBlock(t *testing.T) {

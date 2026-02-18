@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/munchbox/s3-proxy/internal/config"
-	db "github.com/munchbox/s3-proxy/internal/storage/sqlc"
+	"github.com/afreidah/s3-proxy/internal/config"
+	db "github.com/afreidah/s3-proxy/internal/storage/sqlc"
 )
 
 //go:embed migration.sql

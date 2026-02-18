@@ -23,11 +23,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/munchbox/s3-proxy/internal/auth"
-	"github.com/munchbox/s3-proxy/internal/config"
-	"github.com/munchbox/s3-proxy/internal/server"
-	"github.com/munchbox/s3-proxy/internal/storage"
-	"github.com/munchbox/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-proxy/internal/auth"
+	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-proxy/internal/server"
+	"github.com/afreidah/s3-proxy/internal/storage"
+	"github.com/afreidah/s3-proxy/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 

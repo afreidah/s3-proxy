@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/munchbox/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-proxy/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
 

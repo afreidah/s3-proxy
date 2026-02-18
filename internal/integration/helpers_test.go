@@ -22,9 +22,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/munchbox/s3-proxy/internal/config"
-	"github.com/munchbox/s3-proxy/internal/server"
-	"github.com/munchbox/s3-proxy/internal/storage"
+	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-proxy/internal/server"
+	"github.com/afreidah/s3-proxy/internal/storage"
 )
 
 const virtualBucket = "test-bucket"

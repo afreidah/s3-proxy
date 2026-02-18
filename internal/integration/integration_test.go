@@ -19,9 +19,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
-	"github.com/munchbox/s3-proxy/internal/config"
-	"github.com/munchbox/s3-proxy/internal/server"
-	"github.com/munchbox/s3-proxy/internal/storage"
+	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-proxy/internal/server"
+	"github.com/afreidah/s3-proxy/internal/storage"
 )
 
 // -------------------------------------------------------------------------
