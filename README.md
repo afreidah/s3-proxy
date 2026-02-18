@@ -1,6 +1,8 @@
 # S3 Orchestrator
 
-An S3-compatible orchestrator that combines multiple storage backends into a single unified endpoint. Add as many S3-compatible backends as you want — OCI Object Storage, Backblaze B2, AWS S3, MinIO, whatever — and the orchestrator presents them to clients as one seamless bucket. Per-backend quota enforcement lets you cap each backend at exactly the byte limit you choose, so you can stack multiple free-tier allocations from different providers into a single, larger storage target for backups, media, or anything else without worrying about surprise bills.
+An S3-compatible orchestrator that combines multiple storage backends into a single unified endpoint. Add as many S3-compatible backends as you want — OCI Object Storage, Backblaze B2, AWS S3, MinIO, whatever — and the orchestrator presents them to clients as one or more virtual buckets. Per-backend quota enforcement lets you cap each backend at exactly the byte limit you choose, so you can stack multiple free-tier allocations from different providers into a single, larger storage target for backups, media, or anything else without worrying about surprise bills.
+
+Multiple virtual buckets let different applications share the same orchestrator with isolated file namespaces and independent credentials. Each bucket's objects are stored with an internal key prefix (`{bucket}/{key}`), so bucket isolation requires zero changes to the storage layer or database schema.
 
 Built-in cross-backend replication also makes this an easy way to keep your data in multiple clouds without touching your application. Point your app at the proxy, set a replication factor, and every object automatically lands in two or more providers — instant multi-cloud redundancy with zero client-side changes.
 
@@ -45,16 +47,28 @@ Objects are automatically routed to the first backend with available quota. Meta
 | AbortMultipartUpload | `DELETE` | `/{bucket}/{key}?uploadId=X` | |
 | ListParts | `GET` | `/{bucket}/{key}?uploadId=X` | |
 
-All requests must target the configured virtual bucket name (default: `unified`). Requests to other bucket names return `404 NoSuchBucket`.
+Each request must target a virtual bucket name that matches the credentials used to sign the request. Requests to a bucket the credentials aren't authorized for return `403 AccessDenied`.
 
-## Authentication
+## Authentication & Multi-Bucket
 
-Two methods, checked in order:
+Each virtual bucket has one or more credential sets. On every request, the orchestrator:
+
+1. Extracts the access key from the SigV4 `Authorization` header (or token from `X-Proxy-Token`).
+2. Looks up which bucket the credential belongs to.
+3. Verifies the signature (SigV4) or token.
+4. Validates the URL path bucket matches the authorized bucket.
+
+Two auth methods are supported, checked in order:
 
 1. **AWS SigV4** (recommended) - Standard AWS Signature Version 4 via the `Authorization` header. Compatible with `aws cli`, SDKs, and any S3 client.
 2. **Legacy token** - Simple `X-Proxy-Token` header for backward compatibility.
 
-If neither `access_key_id` nor `token` is configured, authentication is disabled.
+Multiple services can share a bucket by each having their own credentials that all map to the same bucket name. Access key IDs must be globally unique across all buckets.
+
+Authentication is always required — every bucket must have at least one credential set.
+
+For client usage examples (AWS CLI, rclone, boto3, Go SDK), see the [User Guide](docs/user-guide.md).
+For deployment and operations, see the [Admin Guide](docs/admin-guide.md).
 
 ## Degraded Mode (Circuit Breaker)
 
@@ -112,13 +126,27 @@ YAML config file specified via `-config` flag (default: `config.yaml`). Supports
 ```yaml
 server:
   listen_addr: "0.0.0.0:9000"
-  virtual_bucket: "unified"
   max_object_size: 5368709120  # 5 GB (default)
 
-auth:
-  access_key_id: "YOUR_ACCESS_KEY"
-  secret_access_key: "YOUR_SECRET_KEY"
-  token: "optional-legacy-token"
+# Virtual buckets with per-bucket credentials
+buckets:
+  - name: "app1-files"
+    credentials:
+      - access_key_id: "APP1_ACCESS_KEY"
+        secret_access_key: "APP1_SECRET_KEY"
+
+  - name: "shared-files"
+    credentials:
+      # Multiple services can share a bucket with separate credentials
+      - access_key_id: "WRITER_ACCESS_KEY"
+        secret_access_key: "WRITER_SECRET_KEY"
+      - access_key_id: "READER_ACCESS_KEY"
+        secret_access_key: "READER_SECRET_KEY"
+
+  # Legacy token auth (backward compatibility)
+  # - name: "legacy-bucket"
+  #   credentials:
+  #     - token: "my-secret-token"
 
 database:
   host: "localhost"
@@ -265,23 +293,24 @@ Spans are emitted for every HTTP request, manager operation, and backend S3 call
 
 ## Sync Subcommand
 
-Imports pre-existing objects from a backend S3 bucket into the orchestrator's metadata database. Useful when bringing an existing bucket under orchestrator management.
+Imports pre-existing objects from a backend S3 bucket into the orchestrator's metadata database. Useful when bringing an existing bucket under orchestrator management. The `--bucket` flag specifies which virtual bucket the imported objects belong to — keys are stored with a `{bucket}/` prefix for namespace isolation.
 
 ```bash
-# Import all objects from a backend
-s3-orchestrator sync --config config.yaml --backend oci
+# Import all objects from a backend into the "unified" virtual bucket
+s3-orchestrator sync --config config.yaml --backend oci --bucket unified
 
 # Preview what would be imported
-s3-orchestrator sync --config config.yaml --backend oci --dry-run
+s3-orchestrator sync --config config.yaml --backend oci --bucket unified --dry-run
 
 # Import only objects under a prefix
-s3-orchestrator sync --config config.yaml --backend oci --prefix photos/
+s3-orchestrator sync --config config.yaml --backend oci --bucket unified --prefix photos/
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config` | `config.yaml` | Path to configuration file |
 | `--backend` | (required) | Backend name to sync |
+| `--bucket` | (required) | Virtual bucket name to prefix imported keys with |
 | `--prefix` | `""` | Only sync objects with this key prefix |
 | `--dry-run` | `false` | Preview what would be imported without writing |
 
@@ -333,10 +362,10 @@ cmd/s3-orchestrator/
   main.go                    Entry point, subcommand dispatch, background tasks
   sync.go                    Sync subcommand (bucket import)
 internal/
-  auth/auth.go               SigV4 verification, legacy token auth
+  auth/auth.go               BucketRegistry, SigV4 verification, legacy token auth
   config/config.go           YAML config loader with env var expansion
   server/
-    server.go                HTTP router, auth middleware, metrics recording
+    server.go                HTTP router, bucket resolution, key prefixing, metrics
     objects.go               PUT, GET, HEAD, DELETE, COPY handlers
     list.go                  ListObjectsV2 handler (XML response)
     multipart.go             Multipart upload handlers
