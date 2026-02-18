@@ -1,4 +1,4 @@
-module github.com/afreidah/s3-proxy
+module github.com/afreidah/s3-orchestrator
 
 go 1.26.0
 

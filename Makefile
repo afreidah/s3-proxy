@@ -1,14 +1,14 @@
 # -------------------------------------------------------------------------------
-# S3 Proxy - Multi-Architecture Build and Push
+# S3 Orchestrator - Multi-Architecture Build and Push
 #
 # Author: Alex Freidah
 #
-# Go S3 proxy service for unified S3-compatible storage access. Builds multi-arch
+# Go S3 orchestrator for unified S3-compatible storage access. Builds multi-arch
 # container images.
 # -------------------------------------------------------------------------------
 
 REGISTRY   ?= registry.munchbox.cc
-IMAGE      := s3-proxy
+IMAGE      := s3-orchestrator
 VERSION    ?= latest
 
 FULL_TAG   := $(REGISTRY)/$(IMAGE):$(VERSION)
@@ -32,8 +32,8 @@ help: ## Display available Make targets
 # -------------------------------------------------------------------------
 
 builder: ## Ensure the Buildx builder exists
-	@docker buildx inspect s3-proxy-builder >/dev/null 2>&1 || \
-		docker buildx create --name s3-proxy-builder --driver-opt network=host --use
+	@docker buildx inspect s3-orchestrator-builder >/dev/null 2>&1 || \
+		docker buildx create --name s3-orchestrator-builder --driver-opt network=host --use
 	@docker buildx inspect --bootstrap
 
 # -------------------------------------------------------------------------
@@ -74,7 +74,7 @@ lint: ## Run Go linter
 	golangci-lint run ./...
 
 run: ## Run locally (requires config.yaml)
-	go run ./cmd/s3-proxy -config config.yaml
+	go run ./cmd/s3-orchestrator -config config.yaml
 
 # -------------------------------------------------------------------------
 # INTEGRATION TESTS

@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-orchestrator/internal/telemetry"
 )
 
 // usageCounters holds atomic counters for a single backend's usage deltas.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/config"
 )
 
 func newTestCB(mock *mockStore, threshold int, timeout time.Duration) *CircuitBreakerStore {

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------
-// Configuration - S3 Proxy Settings
+// Configuration - S3 Orchestrator Settings
 //
 // Author: Alex Freidah
 //

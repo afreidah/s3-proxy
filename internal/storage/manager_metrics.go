@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/afreidah/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-orchestrator/internal/telemetry"
 )
 
 // -------------------------------------------------------------------------

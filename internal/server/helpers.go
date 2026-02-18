@@ -16,7 +16,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/afreidah/s3-proxy/internal/storage"
+	"github.com/afreidah/s3-orchestrator/internal/storage"
 )
 
 // parsePath extracts bucket and key from the URL path.

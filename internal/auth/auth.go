@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/config"
 )
 
 // sigV4MaxSkew is the maximum allowed clock skew for SigV4 request timestamps.

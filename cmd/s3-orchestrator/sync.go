@@ -17,8 +17,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/afreidah/s3-proxy/internal/config"
-	"github.com/afreidah/s3-proxy/internal/storage"
+	"github.com/afreidah/s3-orchestrator/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/storage"
 )
 
 func runSync() {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-orchestrator/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"

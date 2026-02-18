@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/config"
-	"github.com/afreidah/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-orchestrator/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/telemetry"
 )
 
 // -------------------------------------------------------------------------

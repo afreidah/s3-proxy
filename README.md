@@ -1,10 +1,10 @@
-# S3 Proxy
+# S3 Orchestrator
 
-An S3-compatible proxy that combines multiple storage backends into a single unified endpoint. Add as many S3-compatible backends as you want — OCI Object Storage, Backblaze B2, AWS S3, MinIO, whatever — and the proxy presents them to clients as one seamless bucket. Per-backend quota enforcement lets you cap each backend at exactly the byte limit you choose, so you can stack multiple free-tier allocations from different providers into a single, larger storage target for backups, media, or anything else without worrying about surprise bills.
+An S3-compatible orchestrator that combines multiple storage backends into a single unified endpoint. Add as many S3-compatible backends as you want — OCI Object Storage, Backblaze B2, AWS S3, MinIO, whatever — and the orchestrator presents them to clients as one seamless bucket. Per-backend quota enforcement lets you cap each backend at exactly the byte limit you choose, so you can stack multiple free-tier allocations from different providers into a single, larger storage target for backups, media, or anything else without worrying about surprise bills.
 
 Built-in cross-backend replication also makes this an easy way to keep your data in multiple clouds without touching your application. Point your app at the proxy, set a replication factor, and every object automatically lands in two or more providers — instant multi-cloud redundancy with zero client-side changes.
 
-Objects are automatically routed to the first backend with available quota. Metadata and quota tracking live in PostgreSQL; the backends only see standard S3 API calls.
+Objects are automatically routed to the first backend with available quota. Metadata and quota tracking live in PostgreSQL; the backends only see standard S3 API calls. The orchestrator is fully S3-compatible and works with any standard S3 client.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ Objects are automatically routed to the first backend with available quota. Meta
                           |
                           v
                     +-----------+
-                    | S3 Proxy  |  <-- SigV4 auth, rate limiting, quota routing
+                    | S3 Orch.  |  <-- SigV4 auth, rate limiting, quota routing
                     +-----------+
                      |         |
             +--------+         +------------------+------------------+
@@ -64,7 +64,7 @@ A three-state circuit breaker wraps all database access:
 closed (healthy) → open (DB down) → half-open (probing) → closed
 ```
 
-When the database becomes unreachable (consecutive failures exceed `failure_threshold`), the proxy enters **degraded mode**:
+When the database becomes unreachable (consecutive failures exceed `failure_threshold`), the orchestrator enters **degraded mode**:
 
 - **Reads** broadcast to all backends in order. A location cache (TTL configurable via `cache_ttl`) stores successful lookups to avoid repeated broadcasts for the same key.
 - **Writes** (PUT, DELETE, COPY, multipart) return `503 ServiceUnavailable`.
@@ -99,8 +99,8 @@ Per-backend monthly limits for API requests, egress bytes, and ingress bytes. Se
 
 **Enforcement behavior:**
 
-- **Writes** (PutObject, CopyObject, CreateMultipartUpload, UploadPart) — backends over their limits are excluded from selection; writes overflow to the next eligible backend. If all backends are over-limit, the proxy returns `507 InsufficientStorage`.
-- **Reads** (GetObject, HeadObject) — over-limit backends are skipped; the proxy tries replicas. Returns `429 SlowDown` only when *all* copies of the object are on over-limit backends.
+- **Writes** (PutObject, CopyObject, CreateMultipartUpload, UploadPart) — backends over their limits are excluded from selection; writes overflow to the next eligible backend. If all backends are over-limit, the orchestrator returns `507 InsufficientStorage`.
+- **Reads** (GetObject, HeadObject) — over-limit backends are skipped; the orchestrator tries replicas. Returns `429 SlowDown` only when *all* copies of the object are on over-limit backends.
 - **Deletes** (DeleteObject, AbortMultipartUpload) — always allowed regardless of limits.
 
 Effective usage is computed as `DB baseline + unflushed in-memory counters + proposed operation`, so enforcement stays accurate between the 30-second flush/refresh cycles without double-counting.
@@ -179,7 +179,7 @@ rate_limit:
 
 ## Database
 
-The proxy connects to PostgreSQL via pgx/v5 connection pools and auto-applies its schema on startup (all DDL uses `IF NOT EXISTS`). Four tables are created:
+The orchestrator connects to PostgreSQL via pgx/v5 connection pools and auto-applies its schema on startup (all DDL uses `IF NOT EXISTS`). Four tables are created:
 
 | Table | Purpose |
 |-------|---------|
@@ -265,17 +265,17 @@ Spans are emitted for every HTTP request, manager operation, and backend S3 call
 
 ## Sync Subcommand
 
-Imports pre-existing objects from a backend S3 bucket into the proxy's metadata database. Useful when bringing an existing bucket under proxy management.
+Imports pre-existing objects from a backend S3 bucket into the orchestrator's metadata database. Useful when bringing an existing bucket under orchestrator management.
 
 ```bash
 # Import all objects from a backend
-s3-proxy sync --config config.yaml --backend oci
+s3-orchestrator sync --config config.yaml --backend oci
 
 # Preview what would be imported
-s3-proxy sync --config config.yaml --backend oci --dry-run
+s3-orchestrator sync --config config.yaml --backend oci --dry-run
 
 # Import only objects under a prefix
-s3-proxy sync --config config.yaml --backend oci --prefix photos/
+s3-orchestrator sync --config config.yaml --backend oci --prefix photos/
 ```
 
 | Flag | Default | Description |
@@ -329,7 +329,7 @@ make push
 ## Project Structure
 
 ```
-cmd/s3-proxy/
+cmd/s3-orchestrator/
   main.go                    Entry point, subcommand dispatch, background tasks
   sync.go                    Sync subcommand (bucket import)
 internal/

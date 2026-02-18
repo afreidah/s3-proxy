@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------
-// S3 Proxy - Unified S3 Endpoint with Quota Management
+// S3 Orchestrator - Unified S3 Endpoint with Quota Management
 //
 // Author: Alex Freidah
 //
@@ -23,11 +23,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/auth"
-	"github.com/afreidah/s3-proxy/internal/config"
-	"github.com/afreidah/s3-proxy/internal/server"
-	"github.com/afreidah/s3-proxy/internal/storage"
-	"github.com/afreidah/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-orchestrator/internal/auth"
+	"github.com/afreidah/s3-orchestrator/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/server"
+	"github.com/afreidah/s3-orchestrator/internal/storage"
+	"github.com/afreidah/s3-orchestrator/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -333,7 +333,7 @@ func runServe() {
 	}()
 
 	// --- Log startup info ---
-	slog.Info("S3 Proxy starting",
+	slog.Info("S3 Orchestrator starting",
 		"version", telemetry.Version,
 		"listen_addr", cfg.Server.ListenAddr,
 		"virtual_bucket", cfg.Server.VirtualBucket,

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/config"
 )
 
 func TestParseSigV4Fields(t *testing.T) {

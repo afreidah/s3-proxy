@@ -18,10 +18,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/afreidah/s3-proxy/internal/auth"
-	"github.com/afreidah/s3-proxy/internal/config"
-	"github.com/afreidah/s3-proxy/internal/storage"
-	"github.com/afreidah/s3-proxy/internal/telemetry"
+	"github.com/afreidah/s3-orchestrator/internal/auth"
+	"github.com/afreidah/s3-orchestrator/internal/config"
+	"github.com/afreidah/s3-orchestrator/internal/storage"
+	"github.com/afreidah/s3-orchestrator/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )

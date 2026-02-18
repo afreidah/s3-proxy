@@ -1,9 +1,9 @@
 # -------------------------------------------------------------------------------
-# S3 Proxy - Unified S3 Endpoint
+# S3 Orchestrator - Unified S3 Endpoint
 #
 # Author: Alex Freidah
 #
-# Go-based S3 proxy service with Prometheus metrics and OpenTelemetry tracing.
+# Go-based S3 orchestrator with Prometheus metrics and OpenTelemetry tracing.
 # Provides a unified endpoint for S3-compatible storage backends.
 # -------------------------------------------------------------------------------
 
@@ -26,8 +26,8 @@ COPY internal/ internal/
 
 # Build binary
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w -X github.com/afreidah/s3-proxy/internal/telemetry.Version=${VERSION}" \
-    -o s3-proxy ./cmd/s3-proxy
+    -ldflags="-s -w -X github.com/afreidah/s3-orchestrator/internal/telemetry.Version=${VERSION}" \
+    -o s3-orchestrator ./cmd/s3-orchestrator
 
 # -------------------------------------------------------------------------
 # Runtime Image
@@ -37,9 +37,9 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /build/s3-proxy /usr/local/bin/
+COPY --from=builder /build/s3-orchestrator /usr/local/bin/
 
 EXPOSE 8080
 
-ENTRYPOINT ["s3-proxy"]
-CMD ["-config", "/etc/s3-proxy/config.yaml"]
+ENTRYPOINT ["s3-orchestrator"]
+CMD ["-config", "/etc/s3-orchestrator/config.yaml"]
