@@ -51,6 +51,9 @@ backends:
     secret_access_key: "${S3_SECRET_ACCESS_KEY}"
     force_path_style: true    # required for OCI, MinIO, B2
     quota_bytes: 21474836480  # 20 GB (0 or omit for unlimited)
+    # api_request_limit: 0    # monthly API request limit (0 = unlimited)
+    # egress_byte_limit: 0    # monthly egress byte limit (0 = unlimited)
+    # ingress_byte_limit: 0   # monthly ingress byte limit (0 = unlimited)
 
 telemetry:
   metrics:
