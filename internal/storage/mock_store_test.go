@@ -37,6 +37,10 @@ type mockStore struct {
 	deleteMultipartErr error
 	recordPartErr      error
 
+	// Usage tracking
+	flushUsageErr   error
+	flushUsageCalls []flushUsageCall
+
 	// --- Call tracking ---
 	recordObjectCalls []recordObjectCall
 	deleteObjectCalls []string
@@ -46,6 +50,14 @@ type mockStore struct {
 type recordObjectCall struct {
 	Key, Backend string
 	Size         int64
+}
+
+type flushUsageCall struct {
+	backendName  string
+	period       string
+	apiRequests  int64
+	egressBytes  int64
+	ingressBytes int64
 }
 
 var _ MetadataStore = (*mockStore)(nil)
@@ -173,4 +185,21 @@ func (m *mockStore) GetUnderReplicatedObjects(_ context.Context, _, _ int) ([]Ob
 
 func (m *mockStore) RecordReplica(_ context.Context, _, _, _ string, _ int64) (bool, error) {
 	return false, nil
+}
+
+func (m *mockStore) FlushUsageDeltas(_ context.Context, backendName, period string, apiRequests, egressBytes, ingressBytes int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushUsageCalls = append(m.flushUsageCalls, flushUsageCall{
+		backendName:  backendName,
+		period:       period,
+		apiRequests:  apiRequests,
+		egressBytes:  egressBytes,
+		ingressBytes: ingressBytes,
+	})
+	return m.flushUsageErr
+}
+
+func (m *mockStore) GetUsageForPeriod(_ context.Context, _ string) (map[string]UsageStat, error) {
+	return nil, nil
 }

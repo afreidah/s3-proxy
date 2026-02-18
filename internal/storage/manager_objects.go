@@ -83,6 +83,7 @@ func (m *BackendManager) PutObject(ctx context.Context, key string, body io.Read
 
 	// --- Record metrics ---
 	m.recordOperation(operation, backendName, start, nil)
+	m.recordUsage(backendName, 1, 0, size)
 
 	span.SetStatus(codes.Ok, "")
 	return etag, nil
@@ -91,7 +92,8 @@ func (m *BackendManager) PutObject(ctx context.Context, key string, body io.Read
 // withReadFailover looks up all copies of an object and tries each backend in
 // order until one succeeds. The tryBackend callback should attempt the operation
 // and return the object size (for span attributes) or an error to try the next copy.
-func (m *BackendManager) withReadFailover(ctx context.Context, operation, key string, tryBackend func(ctx context.Context, backend ObjectBackend) (int64, error)) error {
+// Returns the name of the backend that succeeded alongside any error.
+func (m *BackendManager) withReadFailover(ctx context.Context, operation, key string, tryBackend func(ctx context.Context, backend ObjectBackend) (int64, error)) (string, error) {
 	start := time.Now()
 
 	ctx, span := telemetry.StartSpan(ctx, "Manager "+operation,
@@ -103,14 +105,14 @@ func (m *BackendManager) withReadFailover(ctx context.Context, operation, key st
 	if err != nil {
 		if errors.Is(err, ErrObjectNotFound) {
 			span.SetStatus(codes.Error, "object not found")
-			return err
+			return "", err
 		}
 		if errors.Is(err, ErrDBUnavailable) {
 			return m.broadcastRead(ctx, operation, key, start, span, tryBackend)
 		}
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-		return fmt.Errorf("failed to find object location: %w", err)
+		return "", fmt.Errorf("failed to find object location: %w", err)
 	}
 
 	var lastErr error
@@ -141,18 +143,18 @@ func (m *BackendManager) withReadFailover(ctx context.Context, operation, key st
 		}
 		span.SetAttributes(telemetry.AttrObjectSize.Int64(size))
 		span.SetStatus(codes.Ok, "")
-		return nil
+		return loc.BackendName, nil
 	}
 
 	span.SetStatus(codes.Error, lastErr.Error())
 	span.RecordError(lastErr)
-	return lastErr
+	return "", lastErr
 }
 
 // broadcastRead tries all backends when the DB is unavailable. Checks the
 // location cache first for a known-good backend, then falls back to trying
 // every backend in order.
-func (m *BackendManager) broadcastRead(ctx context.Context, operation, key string, start time.Time, span trace.Span, tryBackend func(ctx context.Context, backend ObjectBackend) (int64, error)) error {
+func (m *BackendManager) broadcastRead(ctx context.Context, operation, key string, start time.Time, span trace.Span, tryBackend func(ctx context.Context, backend ObjectBackend) (int64, error)) (string, error) {
 	span.SetAttributes(attribute.Bool("s3proxy.degraded_mode", true))
 	telemetry.DegradedReadsTotal.WithLabelValues(operation).Inc()
 
@@ -168,7 +170,7 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 				span.SetAttributes(telemetry.AttrObjectSize.Int64(size))
 				span.SetStatus(codes.Ok, "")
 				telemetry.DegradedCacheHitsTotal.Inc()
-				return nil
+				return cachedBackend, nil
 			}
 			// Cache hit but backend failed — fall through to broadcast
 		}
@@ -195,7 +197,7 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 		span.SetAttributes(telemetry.AttrBackendName.String(name))
 		span.SetAttributes(telemetry.AttrObjectSize.Int64(size))
 		span.SetStatus(codes.Ok, "")
-		return nil
+		return name, nil
 	}
 
 	// All backends failed — return the actual error so the server can
@@ -203,11 +205,11 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 	if lastErr != nil {
 		span.SetStatus(codes.Error, lastErr.Error())
 		span.RecordError(lastErr)
-		return fmt.Errorf("all backends failed during degraded read: %w", lastErr)
+		return "", fmt.Errorf("all backends failed during degraded read: %w", lastErr)
 	}
 
 	span.SetStatus(codes.Error, "no backends available")
-	return ErrObjectNotFound
+	return "", ErrObjectNotFound
 }
 
 // GetObject retrieves an object from the backend where it's stored. Tries the
@@ -215,7 +217,7 @@ func (m *BackendManager) broadcastRead(ctx context.Context, operation, key strin
 func (m *BackendManager) GetObject(ctx context.Context, key string, rangeHeader string) (*GetObjectResult, error) {
 	var result *GetObjectResult
 
-	err := m.withReadFailover(ctx, "GetObject", key, func(ctx context.Context, backend ObjectBackend) (int64, error) {
+	backendName, err := m.withReadFailover(ctx, "GetObject", key, func(ctx context.Context, backend ObjectBackend) (int64, error) {
 		r, err := backend.GetObject(ctx, key, rangeHeader)
 		if err != nil {
 			return 0, err
@@ -226,6 +228,7 @@ func (m *BackendManager) GetObject(ctx context.Context, key string, rangeHeader 
 	if err != nil {
 		return nil, err
 	}
+	m.recordUsage(backendName, 1, result.Size, 0)
 	return result, nil
 }
 
@@ -238,7 +241,7 @@ func (m *BackendManager) HeadObject(ctx context.Context, key string) (int64, str
 		rETag        string
 	)
 
-	err := m.withReadFailover(ctx, "HeadObject", key, func(ctx context.Context, backend ObjectBackend) (int64, error) {
+	backendName, err := m.withReadFailover(ctx, "HeadObject", key, func(ctx context.Context, backend ObjectBackend) (int64, error) {
 		size, contentType, etag, err := backend.HeadObject(ctx, key)
 		if err != nil {
 			return 0, err
@@ -249,6 +252,7 @@ func (m *BackendManager) HeadObject(ctx context.Context, key string) (int64, str
 	if err != nil {
 		return 0, "", "", err
 	}
+	m.recordUsage(backendName, 1, 0, 0)
 	return rSize, rContentType, rETag, nil
 }
 
@@ -382,6 +386,9 @@ func (m *BackendManager) CopyObject(ctx context.Context, sourceKey, destKey stri
 	}
 
 	m.recordOperation(operation, destBackendName, start, nil)
+	m.recordUsage(locations[0].BackendName, 1, size, 0) // source: Get + egress
+	m.recordUsage(destBackendName, 1, 0, size)           // dest: Put + ingress
+
 	span.SetStatus(codes.Ok, "")
 	return etag, nil
 }
@@ -439,6 +446,9 @@ func (m *BackendManager) DeleteObject(ctx context.Context, key string) error {
 	// --- Record metrics (use first copy's backend for primary) ---
 	if len(copies) > 0 {
 		m.recordOperation(operation, copies[0].BackendName, start, nil)
+	}
+	for _, c := range copies {
+		m.recordUsage(c.BackendName, 1, 0, 0)
 	}
 
 	span.SetStatus(codes.Ok, "")

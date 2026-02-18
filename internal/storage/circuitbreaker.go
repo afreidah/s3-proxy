@@ -360,3 +360,21 @@ func (cb *CircuitBreakerStore) RecordReplica(ctx context.Context, key, targetBac
 	err = cb.postCheck(err)
 	return result, err
 }
+
+func (cb *CircuitBreakerStore) FlushUsageDeltas(ctx context.Context, backendName, period string, apiRequests, egressBytes, ingressBytes int64) error {
+	if err := cb.preCheck(); err != nil {
+		return err
+	}
+	err := cb.real.FlushUsageDeltas(ctx, backendName, period, apiRequests, egressBytes, ingressBytes)
+	err = cb.postCheck(err)
+	return err
+}
+
+func (cb *CircuitBreakerStore) GetUsageForPeriod(ctx context.Context, period string) (map[string]UsageStat, error) {
+	if err := cb.preCheck(); err != nil {
+		return nil, err
+	}
+	result, err := cb.real.GetUsageForPeriod(ctx, period)
+	err = cb.postCheck(err)
+	return result, err
+}

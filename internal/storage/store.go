@@ -720,6 +720,40 @@ func (s *Store) ImportObject(ctx context.Context, key, backend string, size int6
 	})
 }
 
+// -------------------------------------------------------------------------
+// USAGE TRACKING
+// -------------------------------------------------------------------------
+
+// FlushUsageDeltas atomically adds accumulated usage deltas to the persistent
+// usage row. Creates the row if it doesn't exist for this (backend, period).
+func (s *Store) FlushUsageDeltas(ctx context.Context, backendName, period string, apiRequests, egressBytes, ingressBytes int64) error {
+	return s.queries.FlushUsageDeltas(ctx, db.FlushUsageDeltasParams{
+		BackendName:  backendName,
+		Period:       period,
+		ApiRequests:  apiRequests,
+		EgressBytes:  egressBytes,
+		IngressBytes: ingressBytes,
+	})
+}
+
+// GetUsageForPeriod returns usage statistics for all backends in the given period.
+func (s *Store) GetUsageForPeriod(ctx context.Context, period string) (map[string]UsageStat, error) {
+	rows, err := s.queries.GetUsageForPeriod(ctx, period)
+	if err != nil {
+		return nil, err
+	}
+
+	stats := make(map[string]UsageStat, len(rows))
+	for _, row := range rows {
+		stats[row.BackendName] = UsageStat{
+			ApiRequests:  row.ApiRequests,
+			EgressBytes:  row.EgressBytes,
+			IngressBytes: row.IngressBytes,
+		}
+	}
+	return stats, nil
+}
+
 // pgTimestamptz converts a time.Time to pgtype.Timestamptz for use with sqlc.
 func pgTimestamptz(t time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: t, Valid: true}

@@ -108,6 +108,7 @@ func (m *BackendManager) UploadPart(ctx context.Context, uploadID string, partNu
 	}
 
 	m.recordOperation(operation, mu.BackendName, start, nil)
+	m.recordUsage(mu.BackendName, 1, 0, size)
 	span.SetStatus(codes.Ok, "")
 	return etag, nil
 }
@@ -217,6 +218,7 @@ func (m *BackendManager) CompleteMultipartUpload(ctx context.Context, uploadID s
 	}
 
 	m.recordOperation(operation, mu.BackendName, start, nil)
+	m.recordUsage(mu.BackendName, 1, 0, 0)
 	span.SetStatus(codes.Ok, "")
 	return etag, nil
 }
@@ -274,6 +276,7 @@ func (m *BackendManager) AbortMultipartUpload(ctx context.Context, uploadID stri
 	}
 
 	m.recordOperation(operation, mu.BackendName, start, nil)
+	m.recordUsage(mu.BackendName, 1, 0, 0)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }

@@ -132,6 +132,9 @@ func (m *BackendManager) replicateObject(ctx context.Context, key string, existi
 			continue
 		}
 
+		m.recordUsage(source, 1, existingCopies[0].SizeBytes, 0) // source: Get + egress
+		m.recordUsage(target, 1, 0, existingCopies[0].SizeBytes) // target: Put + ingress
+
 		exclusion[target] = true
 		created++
 	}

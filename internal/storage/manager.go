@@ -16,10 +16,20 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/afreidah/s3-proxy/internal/telemetry"
 )
+
+// usageCounters holds atomic counters for a single backend's usage deltas.
+// Incremented on the hot path (each request) and periodically flushed to the
+// database.
+type usageCounters struct {
+	apiRequests  atomic.Int64
+	egressBytes  atomic.Int64
+	ingressBytes atomic.Int64
+}
 
 // -------------------------------------------------------------------------
 // ERRORS
@@ -42,8 +52,9 @@ type BackendManager struct {
 	locationCache  map[string]locationCacheEntry // key -> cached backend (for degraded reads)
 	cacheMu        sync.RWMutex
 	cacheTTL       time.Duration
-	backendTimeout time.Duration // per-operation timeout for backend S3 calls
-	stopCache      chan struct{} // signals cache eviction goroutine to stop
+	backendTimeout time.Duration                 // per-operation timeout for backend S3 calls
+	stopCache      chan struct{}                  // signals cache eviction goroutine to stop
+	usage          map[string]*usageCounters     // per-backend atomic usage counters
 }
 
 // locationCacheEntry holds a cached key-to-backend mapping with TTL.
@@ -54,6 +65,11 @@ type locationCacheEntry struct {
 
 // NewBackendManager creates a new backend manager with the given backends and store.
 func NewBackendManager(backends map[string]ObjectBackend, store MetadataStore, order []string, cacheTTL, backendTimeout time.Duration) *BackendManager {
+	usage := make(map[string]*usageCounters, len(backends))
+	for name := range backends {
+		usage[name] = &usageCounters{}
+	}
+
 	m := &BackendManager{
 		backends:       backends,
 		store:          store,
@@ -62,6 +78,7 @@ func NewBackendManager(backends map[string]ObjectBackend, store MetadataStore, o
 		cacheTTL:       cacheTTL,
 		backendTimeout: backendTimeout,
 		stopCache:      make(chan struct{}),
+		usage:          usage,
 	}
 
 	// Periodically evict expired cache entries.
@@ -152,6 +169,23 @@ func GenerateUploadID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// recordUsage increments the in-memory usage counters for a backend.
+func (m *BackendManager) recordUsage(backendName string, apiCalls, egress, ingress int64) {
+	c, ok := m.usage[backendName]
+	if !ok {
+		return
+	}
+	if apiCalls > 0 {
+		c.apiRequests.Add(apiCalls)
+	}
+	if egress > 0 {
+		c.egressBytes.Add(egress)
+	}
+	if ingress > 0 {
+		c.ingressBytes.Add(ingress)
+	}
 }
 
 // recordOperation updates Prometheus metrics for a manager operation.
