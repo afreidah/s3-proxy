@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Multipart Upload Handlers - S3 Multipart Upload Protocol
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // HTTP handlers for S3 multipart upload operations. Supports creating uploads,
 // uploading parts, completing uploads (reassembly), aborting uploads, and listing

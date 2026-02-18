@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Tracing - OpenTelemetry Instrumentation
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // OpenTelemetry tracer setup and span helpers. Supports OTLP export to collectors
 // like Jaeger, Tempo, or any OTLP-compatible backend. Provides context propagation

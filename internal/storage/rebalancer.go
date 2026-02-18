@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Rebalancer - Periodic Backend Object Distribution
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Moves objects between backends to optimize space distribution. Supports two
 // strategies: "pack" consolidates free space by filling backends in order, and

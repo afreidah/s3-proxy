@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Backend - S3-Compatible Storage Client
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Storage backend implementation using AWS SDK v2. Connects to any S3-compatible
 // endpoint (OCI, AWS, B2, MinIO) via custom endpoint configuration. The same code

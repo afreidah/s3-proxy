@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Configuration Tests - Validation and Defaults
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Unit tests for configuration validation, default value application, duplicate
 // backend detection, and PostgreSQL connection string generation.

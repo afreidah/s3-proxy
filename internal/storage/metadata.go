@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // MetadataStore - Interface for Object Metadata Persistence
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Defines the contract between the BackendManager and its metadata store.
 // Implemented by Store (real PostgreSQL) and CircuitBreakerStore (degraded

@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Metrics - Prometheus Instrumentation
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Prometheus metric definitions for the S3 proxy. Tracks request counts, latencies,
 // sizes, and backend health. All metrics are prefixed with 's3proxy_' for easy

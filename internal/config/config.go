@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Configuration - S3 Proxy Settings
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Configuration types and loader for the S3 proxy. Supports environment variable
 // expansion in YAML values using ${VAR} syntax. Validates required fields before

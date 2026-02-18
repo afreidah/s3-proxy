@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Replicator - Background Replica Creation Worker
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Creates additional copies of under-replicated objects across backends. Objects
 // are written to one backend on PUT; this worker asynchronously ensures each

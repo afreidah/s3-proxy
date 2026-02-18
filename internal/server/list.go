@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // List Handler - S3 ListObjectsV2
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // HTTP handler for the S3 ListObjectsV2 operation. Returns XML responses
 // compatible with S3 clients, supporting prefix filtering, delimiter-based

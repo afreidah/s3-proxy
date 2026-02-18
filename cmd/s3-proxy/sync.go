@@ -1,7 +1,7 @@
 // -------------------------------------------------------------------------------
 // Sync Subcommand - Import Pre-Existing Bucket Objects
 //
-// Project: Munchbox / Author: Alex Freidah
+// Author: Alex Freidah
 //
 // Scans a backend S3 bucket via ListObjectsV2 and imports discovered objects
 // into the proxy's metadata database. Objects already tracked for the backend
