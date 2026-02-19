@@ -183,15 +183,19 @@ func (m *BackendManager) copyToReplica(ctx context.Context, key string, copies [
 			continue
 		}
 
-		result, err := srcBackend.GetObject(ctx, key, "")
+		rctx, rcancel := m.withTimeout(ctx)
+		result, err := srcBackend.GetObject(rctx, key, "")
+		rcancel()
 		if err != nil {
 			slog.Warn("Replication: source read failed, trying next copy",
 				"key", key, "source", copy.BackendName, "error", err)
 			continue
 		}
 
-		_, err = targetBackend.PutObject(ctx, key, result.Body, result.Size, result.ContentType)
+		wctx, wcancel := m.withTimeout(ctx)
+		_, err = targetBackend.PutObject(wctx, key, result.Body, result.Size, result.ContentType)
 		_ = result.Body.Close()
+		wcancel()
 		if err != nil {
 			return "", fmt.Errorf("failed to write to target %s: %w", target, err)
 		}
@@ -209,7 +213,9 @@ func (m *BackendManager) cleanupOrphan(ctx context.Context, backendName, key str
 	if !ok {
 		return
 	}
-	if err := backend.DeleteObject(ctx, key); err != nil {
+	dctx, dcancel := m.withTimeout(ctx)
+	defer dcancel()
+	if err := backend.DeleteObject(dctx, key); err != nil {
 		slog.Warn("Replication: failed to clean up orphan",
 			"key", key, "backend", backendName, "error", err)
 	}

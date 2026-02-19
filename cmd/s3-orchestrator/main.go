@@ -300,14 +300,10 @@ func runServe() {
 
 		slog.Info("Shutting down")
 
-		// Stop background goroutines and wait for them to finish
-		bgCancel()
-		bgWg.Wait()
-
-		// Shutdown HTTP server with timeout
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		// Drain inflight HTTP requests first so clients get responses quickly
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			slog.Error("HTTP server shutdown error", "error", err)
 		}
@@ -316,6 +312,10 @@ func runServe() {
 		if rl != nil {
 			rl.Close()
 		}
+
+		// Stop background goroutines and wait for them to finish
+		bgCancel()
+		bgWg.Wait()
 
 		// Stop cache eviction goroutine
 		manager.Close()

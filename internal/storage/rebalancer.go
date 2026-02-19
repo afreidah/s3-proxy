@@ -358,7 +358,9 @@ func (m *BackendManager) executeMoves(ctx context.Context, plan []rebalanceMove,
 		}
 
 		// --- Read from source ---
-		result, err := srcBackend.GetObject(ctx, move.ObjectKey, "")
+		rctx, rcancel := m.withTimeout(ctx)
+		result, err := srcBackend.GetObject(rctx, move.ObjectKey, "")
+		rcancel()
 		if err != nil {
 			slog.Warn("Rebalance: failed to read source object",
 				"key", move.ObjectKey, "backend", move.FromBackend, "error", err)
@@ -367,8 +369,10 @@ func (m *BackendManager) executeMoves(ctx context.Context, plan []rebalanceMove,
 		}
 
 		// --- Write to destination ---
-		_, err = destBackend.PutObject(ctx, move.ObjectKey, result.Body, result.Size, result.ContentType)
+		wctx, wcancel := m.withTimeout(ctx)
+		_, err = destBackend.PutObject(wctx, move.ObjectKey, result.Body, result.Size, result.ContentType)
 		_ = result.Body.Close()
+		wcancel()
 		if err != nil {
 			slog.Warn("Rebalance: failed to write destination object",
 				"key", move.ObjectKey, "backend", move.ToBackend, "error", err)
@@ -382,7 +386,10 @@ func (m *BackendManager) executeMoves(ctx context.Context, plan []rebalanceMove,
 			slog.Error("Rebalance: failed to update object location",
 				"key", move.ObjectKey, "error", err)
 			// Clean up orphan on destination
-			if delErr := destBackend.DeleteObject(ctx, move.ObjectKey); delErr != nil {
+			dctx, dcancel := m.withTimeout(ctx)
+			delErr := destBackend.DeleteObject(dctx, move.ObjectKey)
+			dcancel()
+			if delErr != nil {
 				slog.Warn("Rebalance: failed to clean up orphan", "key", move.ObjectKey, "error", delErr)
 			}
 			telemetry.RebalanceObjectsMoved.WithLabelValues(strategy, "error").Inc()
@@ -393,18 +400,23 @@ func (m *BackendManager) executeMoves(ctx context.Context, plan []rebalanceMove,
 			// Object was deleted or already moved by another process
 			slog.Info("Rebalance: object already moved or deleted, cleaning up",
 				"key", move.ObjectKey)
-			if delErr := destBackend.DeleteObject(ctx, move.ObjectKey); delErr != nil {
+			dctx, dcancel := m.withTimeout(ctx)
+			delErr := destBackend.DeleteObject(dctx, move.ObjectKey)
+			dcancel()
+			if delErr != nil {
 				slog.Warn("Rebalance: failed to clean up orphan", "key", move.ObjectKey, "error", delErr)
 			}
 			continue
 		}
 
 		// --- Delete from source ---
-		if err := srcBackend.DeleteObject(ctx, move.ObjectKey); err != nil {
+		delctx, delcancel := m.withTimeout(ctx)
+		if err := srcBackend.DeleteObject(delctx, move.ObjectKey); err != nil {
 			slog.Warn("Rebalance: failed to delete source object (orphan)",
 				"key", move.ObjectKey, "backend", move.FromBackend, "error", err)
 			// DB is correct, source just has a leftover copy
 		}
+		delcancel()
 
 		m.recordUsage(move.FromBackend, 2, movedSize, 0) // Get + Delete, egress
 		m.recordUsage(move.ToBackend, 1, 0, movedSize)   // Put, ingress
