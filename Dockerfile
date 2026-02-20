@@ -35,11 +35,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 10001 appuser
 
 COPY --from=builder /build/s3-orchestrator /usr/local/bin/
 
-EXPOSE 8080
+USER appuser
+
+EXPOSE 9000
 
 ENTRYPOINT ["s3-orchestrator"]
 CMD ["-config", "/etc/s3-orchestrator/config.yaml"]

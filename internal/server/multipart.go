@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -140,8 +141,9 @@ func (s *Server) handleUploadPart(ctx context.Context, w http.ResponseWriter, r 
 func (s *Server) handleCompleteMultipartUpload(ctx context.Context, w http.ResponseWriter, r *http.Request, bucket, key string) (int, error) {
 	uploadID := r.URL.Query().Get("uploadId")
 
+	// Limit the XML body to 1 MB to prevent memory exhaustion from oversized requests.
 	var req completeMultipartUploadRequest
-	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeS3Error(w, http.StatusBadRequest, "MalformedXML", "Failed to parse request body")
 		return http.StatusBadRequest, fmt.Errorf("failed to decode complete request: %w", err)
 	}

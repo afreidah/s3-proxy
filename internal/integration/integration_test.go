@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
+	"github.com/afreidah/s3-orchestrator/internal/auth"
 	"github.com/afreidah/s3-orchestrator/internal/config"
 	"github.com/afreidah/s3-orchestrator/internal/server"
 	"github.com/afreidah/s3-orchestrator/internal/storage"
@@ -359,36 +360,39 @@ func TestRangeRequests(t *testing.T) {
 	})
 
 	t.Run("FullGetHasAcceptRanges", func(t *testing.T) {
-		url := fmt.Sprintf("http://%s/%s/%s", proxyAddr, virtualBucket, key)
-		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(key),
+		})
 		if err != nil {
-			t.Fatalf("GET: %v", err)
+			t.Fatalf("GetObject: %v", err)
 		}
 		defer resp.Body.Close()
 		io.Copy(io.Discard, resp.Body)
 
-		if resp.StatusCode != 200 {
-			t.Errorf("status = %d, want 200", resp.StatusCode)
-		}
-		if got := resp.Header.Get("Accept-Ranges"); got != "bytes" {
+		if resp.AcceptRanges == nil || *resp.AcceptRanges != "bytes" {
+			got := ""
+			if resp.AcceptRanges != nil {
+				got = *resp.AcceptRanges
+			}
 			t.Errorf("Accept-Ranges = %q, want %q", got, "bytes")
 		}
 	})
 
 	t.Run("HeadHasAcceptRanges", func(t *testing.T) {
-		url := fmt.Sprintf("http://%s/%s/%s", proxyAddr, virtualBucket, key)
-		req, _ := http.NewRequestWithContext(ctx, "HEAD", url, nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(virtualBucket),
+			Key:    aws.String(key),
+		})
 		if err != nil {
-			t.Fatalf("HEAD: %v", err)
+			t.Fatalf("HeadObject: %v", err)
 		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode != 200 {
-			t.Errorf("status = %d, want 200", resp.StatusCode)
-		}
-		if got := resp.Header.Get("Accept-Ranges"); got != "bytes" {
+		if resp.AcceptRanges == nil || *resp.AcceptRanges != "bytes" {
+			got := ""
+			if resp.AcceptRanges != nil {
+				got = *resp.AcceptRanges
+			}
 			t.Errorf("Accept-Ranges = %q, want %q", got, "bytes")
 		}
 	})
@@ -1658,13 +1662,15 @@ func TestImportPreExistingObjects(t *testing.T) {
 
 		// Upload objects directly to MinIO (bypassing the proxy).
 		// These exist in S3 but are invisible to the proxy's metadata DB.
+		// Objects are stored at the bucket-prefixed path to match the proxy's
+		// internal key format (bucket/key).
 		directClient := newDirectMinioClient(t, "minio-1")
 		keys := make([]string, 3)
 		for i := range keys {
 			keys[i] = fmt.Sprintf("import-test/obj-%d-%d", i, time.Now().UnixNano())
 			_, err := directClient.PutObject(ctx, &s3.PutObjectInput{
 				Bucket:        aws.String("backend1"),
-				Key:           aws.String(keys[i]),
+				Key:           aws.String(internalKey(keys[i])),
 				Body:          bytes.NewReader(bytes.Repeat([]byte("I"), 100)),
 				ContentLength: aws.Int64(100),
 			})
@@ -1686,10 +1692,10 @@ func TestImportPreExistingObjects(t *testing.T) {
 			assertHTTPStatus(t, err, 404)
 		}
 
-		// Import each object
+		// Import each object with the bucket-prefixed key
 		store := testStore
 		for _, key := range keys {
-			imported, err := store.ImportObject(ctx, key, "minio-1", 100)
+			imported, err := store.ImportObject(ctx, internalKey(key), "minio-1", 100)
 			if err != nil {
 				t.Fatalf("ImportObject(%q): %v", key, err)
 			}
@@ -1735,12 +1741,12 @@ func TestImportPreExistingObjects(t *testing.T) {
 	t.Run("ImportIdempotent", func(t *testing.T) {
 		resetState(t)
 
-		// Put an object directly on MinIO
+		// Put an object directly on MinIO at the bucket-prefixed path
 		directClient := newDirectMinioClient(t, "minio-1")
 		key := fmt.Sprintf("import-idem/%d", time.Now().UnixNano())
 		_, err := directClient.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:        aws.String("backend1"),
-			Key:           aws.String(key),
+			Key:           aws.String(internalKey(key)),
 			Body:          bytes.NewReader(bytes.Repeat([]byte("D"), 200)),
 			ContentLength: aws.Int64(200),
 		})
@@ -1750,8 +1756,8 @@ func TestImportPreExistingObjects(t *testing.T) {
 
 		store := testStore
 
-		// First import
-		imported, err := store.ImportObject(ctx, key, "minio-1", 200)
+		// First import with bucket-prefixed key
+		imported, err := store.ImportObject(ctx, internalKey(key), "minio-1", 200)
 		if err != nil {
 			t.Fatalf("ImportObject first: %v", err)
 		}
@@ -1760,7 +1766,7 @@ func TestImportPreExistingObjects(t *testing.T) {
 		}
 
 		// Second import of the same key/backend — should be a no-op
-		imported, err = store.ImportObject(ctx, key, "minio-1", 200)
+		imported, err = store.ImportObject(ctx, internalKey(key), "minio-1", 200)
 		if err != nil {
 			t.Fatalf("ImportObject second: %v", err)
 		}
@@ -1798,9 +1804,9 @@ func TestImportPreExistingObjects(t *testing.T) {
 
 		backend := queryObjectBackend(t, key)
 
-		// Try to import the same key — should skip
+		// Try to import the same key (with bucket prefix) — should skip
 		store := testStore
-		imported, err := store.ImportObject(ctx, key, backend, 150)
+		imported, err := store.ImportObject(ctx, internalKey(key), backend, 150)
 		if err != nil {
 			t.Fatalf("ImportObject: %v", err)
 		}
@@ -1917,7 +1923,7 @@ func deleteDirectFromMinio(t *testing.T, backendName, key string) {
 	directClient := newDirectMinioClient(t, backendName)
 	_, err := directClient.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(buckets[backendName]),
-		Key:    aws.String(key),
+		Key:    aws.String(internalKey(key)),
 	})
 	if err != nil {
 		t.Fatalf("direct delete from %s: %v", backendName, err)
@@ -1950,8 +1956,8 @@ func TestStore(t *testing.T) {
 
 		key := uniqueKey(t, "store-overwrite")
 
-		// Record on backend A with 100 bytes.
-		if err := testStore.RecordObject(ctx, key, "minio-1", 100); err != nil {
+		// Record on backend A with 100 bytes (using internal key format).
+		if err := testStore.RecordObject(ctx, internalKey(key), "minio-1", 100); err != nil {
 			t.Fatalf("RecordObject A: %v", err)
 		}
 		if used := queryQuotaUsed(t, "minio-1"); used != 100 {
@@ -1959,7 +1965,7 @@ func TestStore(t *testing.T) {
 		}
 
 		// Overwrite to backend B with 200 bytes.
-		if err := testStore.RecordObject(ctx, key, "minio-2", 200); err != nil {
+		if err := testStore.RecordObject(ctx, internalKey(key), "minio-2", 200); err != nil {
 			t.Fatalf("RecordObject B: %v", err)
 		}
 
@@ -2194,6 +2200,8 @@ func TestSyncPipeline(t *testing.T) {
 		resetState(t)
 
 		// Put 5 objects directly to MinIO (simulating pre-existing bucket content).
+		// Objects are stored at bucket-prefixed paths to match the proxy's
+		// internal key format (bucket/key).
 		directClient := newDirectMinioClient(t, "minio-1")
 		prefix := fmt.Sprintf("sync-test/%d/", time.Now().UnixNano())
 		keys := make([]string, 5)
@@ -2201,7 +2209,7 @@ func TestSyncPipeline(t *testing.T) {
 			keys[i] = fmt.Sprintf("%sobj-%d", prefix, i)
 			_, err := directClient.PutObject(ctx, &s3.PutObjectInput{
 				Bucket:        aws.String("backend1"),
-				Key:           aws.String(keys[i]),
+				Key:           aws.String(internalKey(keys[i])),
 				Body:          bytes.NewReader(bytes.Repeat([]byte("S"), 80)),
 				ContentLength: aws.Int64(80),
 			})
@@ -2215,7 +2223,7 @@ func TestSyncPipeline(t *testing.T) {
 		backend := newTestS3Backend(t, "minio-1")
 		var imported, skipped int
 
-		err := backend.ListObjects(ctx, prefix, func(objects []storage.ListedObject) error {
+		err := backend.ListObjects(ctx, internalKey(prefix), func(objects []storage.ListedObject) error {
 			for _, obj := range objects {
 				ok, err := testStore.ImportObject(ctx, obj.Key, "minio-1", obj.SizeBytes)
 				if err != nil {
@@ -2266,14 +2274,14 @@ func TestSyncPipeline(t *testing.T) {
 	t.Run("IdempotentRerun", func(t *testing.T) {
 		resetState(t)
 
-		// Put 3 objects directly to MinIO.
+		// Put 3 objects directly to MinIO at bucket-prefixed paths.
 		directClient := newDirectMinioClient(t, "minio-1")
 		prefix := fmt.Sprintf("sync-idem/%d/", time.Now().UnixNano())
 		for i := 0; i < 3; i++ {
 			key := fmt.Sprintf("%sobj-%d", prefix, i)
 			_, err := directClient.PutObject(ctx, &s3.PutObjectInput{
 				Bucket:        aws.String("backend1"),
-				Key:           aws.String(key),
+				Key:           aws.String(internalKey(key)),
 				Body:          bytes.NewReader(bytes.Repeat([]byte("I"), 60)),
 				ContentLength: aws.Int64(60),
 			})
@@ -2286,7 +2294,7 @@ func TestSyncPipeline(t *testing.T) {
 
 		// Run sync pipeline twice.
 		syncOnce := func() (imported, skipped int) {
-			err := backend.ListObjects(ctx, prefix, func(objects []storage.ListedObject) error {
+			err := backend.ListObjects(ctx, internalKey(prefix), func(objects []storage.ListedObject) error {
 				for _, obj := range objects {
 					ok, err := testStore.ImportObject(ctx, obj.Key, "minio-1", obj.SizeBytes)
 					if err != nil {
@@ -2338,12 +2346,18 @@ func TestAuthSigV4(t *testing.T) {
 
 	// Start an ephemeral server with SigV4 auth enabled, sharing the same manager.
 	authSrv := &server.Server{
-		Manager:       testManager,
-		VirtualBucket: virtualBucket,
-		AuthConfig: config.AuthConfig{
-			AccessKeyID:     authKey,
-			SecretAccessKey: authSecret,
-		},
+		Manager: testManager,
+		BucketAuth: auth.NewBucketRegistry([]config.BucketConfig{
+			{
+				Name: virtualBucket,
+				Credentials: []config.CredentialConfig{
+					{
+						AccessKeyID:    authKey,
+						SecretAccessKey: authSecret,
+					},
+				},
+			},
+		}),
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

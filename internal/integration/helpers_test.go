@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/afreidah/s3-orchestrator/internal/auth"
 	"github.com/afreidah/s3-orchestrator/internal/config"
 	"github.com/afreidah/s3-orchestrator/internal/server"
 	"github.com/afreidah/s3-orchestrator/internal/storage"
@@ -55,8 +56,18 @@ func TestMain(m *testing.M) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			ListenAddr:    "127.0.0.1:0",
-			VirtualBucket: virtualBucket,
+			ListenAddr: "127.0.0.1:0",
+		},
+		Buckets: []config.BucketConfig{
+			{
+				Name: virtualBucket,
+				Credentials: []config.CredentialConfig{
+					{
+						AccessKeyID:    "test",
+						SecretAccessKey: "test",
+					},
+				},
+			},
 		},
 		Database: config.DatabaseConfig{
 			Host:     pgHost,
@@ -143,9 +154,8 @@ func TestMain(m *testing.M) {
 	testManager = manager
 
 	srv := &server.Server{
-		Manager:       manager,
-		VirtualBucket: virtualBucket,
-		AuthConfig:    cfg.Auth,
+		Manager:    manager,
+		BucketAuth: auth.NewBucketRegistry(cfg.Buckets),
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -189,11 +199,17 @@ func newS3Client(t *testing.T) *s3.Client {
 	})
 }
 
+// internalKey returns the bucket-prefixed key as stored in the DB and backends.
+func internalKey(key string) string {
+	return virtualBucket + "/" + key
+}
+
 // queryObjectBackend returns which backend stores the given object key.
+// Automatically prefixes the key with the virtual bucket name.
 func queryObjectBackend(t *testing.T, key string) string {
 	t.Helper()
 	var backendName string
-	err := testDB.QueryRow("SELECT backend_name FROM object_locations WHERE object_key = $1", key).Scan(&backendName)
+	err := testDB.QueryRow("SELECT backend_name FROM object_locations WHERE object_key = $1", internalKey(key)).Scan(&backendName)
 	if err != nil {
 		t.Fatalf("queryObjectBackend(%q): %v", key, err)
 	}
@@ -234,11 +250,12 @@ func uniqueKey(t *testing.T, prefix string) string {
 }
 
 // queryObjectCopies returns the number of copies (rows) for the given object key.
+// Automatically prefixes the key with the virtual bucket name.
 func queryObjectCopies(t *testing.T, key string) int {
 	t.Helper()
 	var count int
 	err := testDB.QueryRow(
-		"SELECT COUNT(*) FROM object_locations WHERE object_key = $1", key,
+		"SELECT COUNT(*) FROM object_locations WHERE object_key = $1", internalKey(key),
 	).Scan(&count)
 	if err != nil {
 		t.Fatalf("queryObjectCopies(%q): %v", key, err)
@@ -247,10 +264,11 @@ func queryObjectCopies(t *testing.T, key string) int {
 }
 
 // queryObjectBackends returns all backend names storing copies of the given key.
+// Automatically prefixes the key with the virtual bucket name.
 func queryObjectBackends(t *testing.T, key string) []string {
 	t.Helper()
 	rows, err := testDB.Query(
-		"SELECT backend_name FROM object_locations WHERE object_key = $1 ORDER BY created_at ASC", key,
+		"SELECT backend_name FROM object_locations WHERE object_key = $1 ORDER BY created_at ASC", internalKey(key),
 	)
 	if err != nil {
 		t.Fatalf("queryObjectBackends(%q): %v", key, err)
